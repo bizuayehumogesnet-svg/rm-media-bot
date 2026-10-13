@@ -1,3 +1,4 @@
+import os
 import logging
 import sqlite3
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
@@ -48,7 +49,7 @@ def init_db():
         )
     """)
 
-  # ለመጀመሪያ ጊዜ የሙከራ ግምገማዎችን ማስገባት (ካዶ ሰንጠረዡ ባዶ ከሆነ)
+  # ለመጀመሪያ ጊዜ የሙከራ ግምገማዎችን ማስገባት (ሰንጠረዡ ባዶ ከሆነ)
   cursor.execute("SELECT COUNT(*) FROM reviews")
   if cursor.fetchone()[0] == 0:
     cursor.execute(
@@ -216,7 +217,6 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
 
   elif data == "show_reviews":
-    # ከዳታቤዝ የደንበኛ ግምገማዎችን ማምጣት
     conn = sqlite3.connect(DB_FILE)
     cursor = conn.cursor()
     cursor.execute(
@@ -321,7 +321,7 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
-  """ተጠቃሚው የሚጽፋቸውን ጽሁፎች (ለምሳሌ ግምገማዎችን) መቀበያ"""
+  """ተጠቃሚው የሚጽፋቸውን ጽሁፎች መቀበያ"""
   user = update.effective_user
   if context.user_data.get("waiting_for_review"):
     review_text = update.message.text
@@ -377,8 +377,8 @@ async def admin_broadcast(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 def main():
-  # ቦቱን ማስነሻ ቶከን እዚህ ያስገቡ
-  TOKEN = "8999565577:AAG5iVWKoTRzy1h_uahnb1uzrGPK6zN-84o"
+  # ቶከኑን ከ Render Environment Variables በደህንነት እንቀበላለን
+  TOKEN = os.getenv("BOT_TOKEN")
 
   app = ApplicationBuilder().token(TOKEN).build()
 
@@ -395,5 +395,3 @@ def main():
 
 if __name__ == "__main__":
   main()
-
- 

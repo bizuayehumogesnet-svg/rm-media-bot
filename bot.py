@@ -1,4 +1,25 @@
 import os
+from flask import Flask
+from threading import Thread
+
+# አጭር የድር ሰርቨር መፍጠር (ለ Render ፖርት እንዲያሟላ)
+app = Flask('')
+
+@app.route('/')
+def home():
+    return "Bot is running!"
+
+def run():
+    port = int(os.environ.get("PORT", 10000))
+    app.run(host='0.0.0.0', port=port)
+
+def keep_alive():
+    t = Thread(target=run)
+    t.start()
+
+# --- ከዚህ በታች ያለው የእርስዎ የቦት ኮድ ይቀጥላል ---
+
+
 import logging
 import sqlite3
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update

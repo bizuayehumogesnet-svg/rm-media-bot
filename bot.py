@@ -9,16 +9,14 @@ from telegram.ext import (
     CallbackQueryHandler,
     CommandHandler,
     ContextTypes,
-    MessageHandler,
-    filters,
 )
 
-# የድር ሰርቨር ለ Render keep-alive
+# የድር ሰርቨር ለ Render keep-alive (24/7)
 app = Flask('')
 
 @app.route('/')
 def home():
-    return "Advanced RM Media Bot is running!"
+    return "Frictionless Sales Funnel Bot is running!"
 
 def run():
     port = int(os.environ.get("PORT", 10000))
@@ -66,39 +64,53 @@ def init_db():
 
 init_db()
 
-# የቋንቋ መዝገበ-ቃላት (Localization Dictionary)
+# የቋንቋ መዝገበ-ቃላት (Localization Dictionary) - Frictionless Flow
 TEXTS = {
     'am': {
-        'welcome': "ሰላም **{name}**!\n\nእንኳን ወደ **RM Media | Result & Momentum** በደህና መጡ።\nመሪ ቃል: **ውጤት እና ፍጥነት 🚀**\n\nእባክዎ ከታች ካሉት አማራጮች የሚፈልጉትን አገልግሎት ይምረጡ:",
+        'welcome': (
+            "ሰላም **{name}**!\n\n"
+            "እንኳን ወደ **RM Media | Result & Momentum** በደህና መጡ። 🚀\n\n"
+            "📞 **Phone / ስልክ:** +251967830825\n"
+            "💬 **Telegram:** @Respect_for_God\n"
+            "🎨 **Portfolio:** @Real_Works_Ethiopia\n\n"
+            "👇 *እባክዎ የሚፈልጉትን አገልግሎት በመምረጥ በፍጥነት ይዘዙ:*"
+        ),
         'btn_design': "🖼 የ1 ሰዓት ፈጣን ዲዛይን (Fast Design)",
         'btn_video': "🎬 የቪዲዮ ፕሮዳክሽን (Video Production)",
         'btn_social': "📱 የሶሻል ሚዲያ አስተዳደር (Social Media)",
         'btn_portfolio': "🎨 የቀደሙ ስራዎች (Portfolio)",
         'btn_reviews': "⭐ የደንበኞች አስተያየት (Reviews)",
-        'btn_settings': "⚙️ ቋንቋ / ቅንብር (Settings)",
+        'btn_settings': "⚙️ ቋንቋ / Settings",
         'back_menu': "🔙 ወደ ዋናው ምናሌ",
-        'order_now': "📥 ትዕዛዝ ለመስጠት (Order Now)",
-        'design_desc': "🖼 **የ1 ሰዓት ፈጣን ዲዛይን እና ታምብሌን**\n\n- የዩቲዩብ እና ቲክቶክ ታምብሌኖች\n- ማራኪ የሶሻል ሚዲያ ፖስተሮች\n\nትዕዛዝ ለመስጠት ከታች ያለውን ይጫኑ:",
-        'video_desc': "🎬 **የቪዲዮ ፕሮዳክሽን እና ፕሮሞ ኤዲት**\n\n- የምረቃ እና የልደት ቪዲዮ ኤዲቲንግ\n- የንግድ ድርጅት ማስታወቂያ ቪዲዮዎች\n\nለማዘዝ ያግኙን:",
-        'social_desc': "📱 **የሶሻል ሚዲያ አስተዳደር**\n\n- ሙሉ የገጽ (Page) አስተዳደር\n- የይዘት ስትራቴጂ እና የጊዜ ሰሌዳ",
-        'portfolio_desc': "🎨 **የቀደሙ ስራዎች ማከማቻ (Portfolio Archive)**\n\nጥራት ያላቸውን ስራዎቻችንን በታች ባለው ቻናል ይመልከቱ:",
-        'settings_title': "⚙️ **ቅንብር እና ቋንቋ ማስተካከያ (Settings)**\n\nየሚፈልጉትን ቋንቋ ይምረጡ / Choose your language:"
+        'order_now': "📥 አሁኑኑ ትዕዛዝ ይስጡ (Order Now)",
+        'design_desc': "🖼 **የ1 ሰዓት ፈጣን ዲዛይን እና ታምብሌን**\n\n- የዩቲዩብ እና ቲክቶክ ታምብሌኖች\n- ማራኪ የሶሻል ሚዲያ ፖስተሮች\n\n⚡ *ፈጣን አገልግሎት ለማግኘት ከታች ያለውን ይጫኑ:*",
+        'video_desc': "🎬 **የቪዲዮ ፕሮዳክሽን እና ፕሮሞ ኤዲት**\n\n- የምረቃ እና የልደት ቪዲዮ ኤዲቲንግ\n- የንግድ ድርጅት ማስታወቂያ ቪዲዮዎች\n\n⚡ *ትዕዛዝ ለማስተላለፍ ከታች ያለውን ይጫኑ:*",
+        'social_desc': "📱 **የሶሻል ሚዲያ አስተዳደር (SMM)**\n\n- ሙሉ የገጽ (Page) አስተዳደር\n- የይዘት ስትራቴጂ እና የጊዜ ሰሌዳ\n\n⚡ *ውይይት ለመጀመር ከታች ያለውን ይጫኑ:*",
+        'portfolio_desc': "🎨 **ኦፊሴላዊ የፖርትፎሊዮ ማህደር**\n\nጥራት ያላቸው ስራዎቻችንን ከታች ባለው ቻናል ይመለከታሉ:",
+        'settings_title': "⚙️ **ቋንቋ ይምረጡ / Choose Language:**"
     },
     'en': {
-        'welcome': "Hello **{name}**!\n\nWelcome to **RM Media | Result & Momentum**.\nMotto: **Result & Momentum 🚀**\n\nPlease select your desired service below:",
+        'welcome': (
+            "Hello **{name}**!\n\n"
+            "Welcome to **RM Media | Result & Momentum**. 🚀\n\n"
+            "📞 **Phone:** +251967830825\n"
+            "💬 **Telegram:** @Respect_for_God\n"
+            "🎨 **Portfolio:** @Real_Works_Ethiopia\n\n"
+            "👇 *Select your desired service below to proceed instantly:*"
+        ),
         'btn_design': "🖼 1-Hour Fast Design",
-        'btn_video': "🎬 Video Production & Editing",
+        'btn_video': "🎬 Video Production",
         'btn_social': "📱 Social Media Management",
         'btn_portfolio': "🎨 Portfolio Showcase",
         'btn_reviews': "⭐ Client Reviews",
         'btn_settings': "⚙️ Language / Settings",
         'back_menu': "🔙 Back to Main Menu",
         'order_now': "📥 Order Now",
-        'design_desc': "🖼 **1-Hour Fast Design & Thumbnails**\n\n- YouTube & TikTok Thumbnails\n- Attractive Social Media Posters\n\nClick below to order:",
-        'video_desc': "🎬 **Video Production & Promo Edit**\n\n- Graduation & Birthday Video Editing\n- Commercial Promo Videos\n\nContact us to order:",
-        'social_desc': "📱 **Social Media Management**\n\n- Full Page Management\n- Content Strategy & Scheduling",
+        'design_desc': "🖼 **1-Hour Fast Design & Thumbnails**\n\n- YouTube & TikTok Thumbnails\n- Attractive Social Media Posters\n\n⚡ *Click below for instant order:*",
+        'video_desc': "🎬 **Video Production & Promo Edit**\n\n- Graduation & Birthday Video Editing\n- Commercial Promo Videos\n\n⚡ *Click below to contact us:*",
+        'social_desc': "📱 **Social Media Management (SMM)**\n\n- Full Page Management\n- Content Strategy & Scheduling\n\n⚡ *Click below to book consultation:*",
         'portfolio_desc': "🎨 **Official Portfolio Archive**\n\nCheck out our high-quality works in our channel below:",
-        'settings_title': "⚙️ **Settings & Language**\n\nChoose your preferred language:"
+        'settings_title': "⚙️ **Choose Language / ቋንቋ ይምረጡ:**"
     }
 }
 
@@ -124,13 +136,16 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     lang = get_user_lang(user.id)
     t = TEXTS[lang]
 
+    # Clean, professional Livegram-style inline layout (Minimalist & Focused)
     keyboard = [
         [InlineKeyboardButton(t['btn_design'], callback_data="serv_design")],
         [InlineKeyboardButton(t['btn_video'], callback_data="serv_video")],
         [InlineKeyboardButton(t['btn_social'], callback_data="serv_social")],
         [InlineKeyboardButton(t['btn_portfolio'], callback_data="serv_portfolio")],
-        [InlineKeyboardButton(t['btn_reviews'], callback_data="show_reviews")],
-        [InlineKeyboardButton(t['btn_settings'], callback_data="settings")],
+        [
+            InlineKeyboardButton(t['btn_reviews'], callback_data="show_reviews"),
+            InlineKeyboardButton(t['btn_settings'], callback_data="settings"),
+        ],
     ]
     reply_markup = InlineKeyboardMarkup(keyboard)
     welcome_text = t['welcome'].format(name=user.first_name)
@@ -150,6 +165,7 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     lang = get_user_lang(user_id)
     t = TEXTS[lang]
 
+    # Frictionless 2-Click Funnel Implementation
     if data == "serv_design":
         markup = InlineKeyboardMarkup([
             [InlineKeyboardButton(t['order_now'], url="https://t.me/Respect_for_God")],
@@ -173,7 +189,7 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     elif data == "serv_portfolio":
         markup = InlineKeyboardMarkup([
-            [InlineKeyboardButton("🔗 ቻናሉን ይጎብኙ (Visit Channel)", url="https://t.me/RM_Real_Works_Ethiopia")],
+            [InlineKeyboardButton("🔗 ቻናሉን ይጎብኙ (Visit Channel)", url="https://t.me/Real_Works_Ethiopia")],
             [InlineKeyboardButton(t['back_menu'], callback_data="main_menu")],
         ])
         await query.edit_message_text(t['portfolio_desc'], reply_markup=markup, parse_mode="Markdown")
@@ -230,7 +246,7 @@ def main():
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CallbackQueryHandler(button_handler))
 
-    print("Advanced RM Media Bot is up and running 24/7...")
+    print("Advanced Frictionless RM Media Bot is up and running 24/7...")
     app.run_polling()
 
 if __name__ == "__main__":

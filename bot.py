@@ -25,7 +25,7 @@ app = Flask('')
 
 @app.route('/')
 def home():
-    return "RM Media 10x Full Automated Bot is Live!"
+    return "RM Media 10x Fully Automated & Secure Bot is Live!"
 
 def run():
     port = int(os.environ.get("PORT", 10000))
@@ -42,6 +42,10 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 DB_FILE = "rm_media_advanced.db"
+
+# 🛑 SECURITY SETTING: እዚህ ጋር የራስህን Telegram Numerical User ID ብቻ አስገባ!
+# (የቴሌግራም ID ህን ለማወቅ @userinfobot ን በቴሌግራም መጠቀም ትችላለህ)
+ADMIN_USER_ID = 123456789  # 👈 እዚህ ጋር ቁጥርህን ተካ!
 
 def init_db():
     conn = sqlite3.connect(DB_FILE)
@@ -74,6 +78,13 @@ def init_db():
             created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
         )
     """)
+    
+    # Auto-migration check for existing DBs
+    cursor.execute("PRAGMA table_info(users)")
+    columns = [column[1] for column in cursor.fetchall()]
+    if 'phone_number' not in columns:
+        cursor.execute("ALTER TABLE users ADD COLUMN phone_number TEXT")
+        
     conn.commit()
     conn.close()
 
@@ -253,7 +264,12 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         query = update.callback_query
         await query.edit_message_text(welcome_text, reply_markup=reply_markup, parse_mode="Markdown")
 
+# 🔒 RESTRICTED ADMIN STATS
 async def stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.effective_user.id
+    if user_id != ADMIN_USER_ID:
+        return  # ባለቤቱ ካልሆነ ምንም አይነት ምላሽ አይሰጥም (ባዶ ይተዋል)
+
     conn = sqlite3.connect(DB_FILE)
     cursor = conn.cursor()
     cursor.execute("SELECT COUNT(*) FROM users")
@@ -267,13 +283,40 @@ async def stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
     conn.close()
 
     stats_msg = (
-        "📊 **RM Media Analytics & Funnel Stats**\n\n"
+        "📊 **RM Media Private Admin Analytics**\n\n"
         f"👥 **አጠቃላይ የቦት ተጠቃሚዎች:** {total_users}\n"
         f"📱 **የተመዘገቡ ስልክ ቁጥሮች (Leads):** {phone_leads}\n"
         f"🛒 **የተደረጉ አጠቃላይ ትዕዛዞች:** {total_orders}\n"
         f"⭐ **የተጻፉ ሪቪውዎች:** {total_reviews}\n"
     )
     await update.message.reply_text(stats_msg, parse_mode="Markdown")
+
+# 📢 ADMIN BROADCAST COMMAND (/broadcast Your Message)
+async def broadcast(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.effective_user.id
+    if user_id != ADMIN_USER_ID:
+        return
+
+    if not context.args:
+        await update.message.reply_text("⚠️ **አጠቃቀም:** `/broadcast የ መልእክት ጽሁፍ`", parse_mode="Markdown")
+        return
+
+    broadcast_msg = " ".join(context.args)
+    conn = sqlite3.connect(DB_FILE)
+    cursor = conn.cursor()
+    cursor.execute("SELECT user_id FROM users")
+    users = cursor.fetchall()
+    conn.close()
+
+    sent_count = 0
+    for u in users:
+        try:
+            await context.bot.send_message(chat_id=u[0], text=broadcast_msg, parse_mode="Markdown")
+            sent_count += 1
+        except Exception:
+            continue
+
+    await update.message.reply_text(f"✅ **መልእክቱ ለ {sent_count} ተጠቃሚዎች በተሳካ ሁኔታ ተልኳል!**")
 
 async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
@@ -419,10 +462,11 @@ def main():
 
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("stats", stats))
+    app.add_handler(CommandHandler("broadcast", broadcast))
     app.add_handler(CallbackQueryHandler(button_handler))
     app.add_handler(MessageHandler(filters.ALL, handle_message))
 
-    print("RM Media 10x Full Automation Bot Running 24/7...")
+    print("RM Media Secured 10x Automation Engine Running...")
     app.run_polling()
 
 if __name__ == "__main__":

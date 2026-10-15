@@ -45,7 +45,7 @@ DB_FILE = "rm_media_advanced.db"
 
 # 🛑 SECURITY SETTING: እዚህ ጋር የራስህን Telegram Numerical User ID ብቻ አስገባ!
 # (የቴሌግራም ID ህን ለማወቅ @userinfobot ን በቴሌግራም መጠቀም ትችላለህ)
-ADMIN_USER_ID = 123456789  # 👈 እዚህ ጋር ቁጥርህን ተካ!
+ADMIN_USER_ID = 2133585693  # 👈 እዚህ ጋር ቁጥርህን ተካ!
 
 def init_db():
     conn = sqlite3.connect(DB_FILE)

@@ -64,15 +64,15 @@ def init_db():
 
 init_db()
 
-# የቋንቋ መዝገበ-ቃላት (Localization Dictionary) - Frictionless Flow
+# የቋንቋ መዝገበ-ቃላት (Localization Dictionary) - Markdown Underscore Fix
 TEXTS = {
     'am': {
         'welcome': (
             "ሰላም **{name}**!\n\n"
             "እንኳን ወደ **RM Media | Result & Momentum** በደህና መጡ። 🚀\n\n"
             "📞 **Phone / ስልክ:** +251967830825\n"
-            "💬 **Telegram:** @Respect_for_God\n"
-            "🎨 **Portfolio:** @Real_Works_Ethiopia\n\n"
+            "💬 **Telegram:** [ንኪና አግኘኝ](https://t.me/Respect_for_God)\n"
+            "🎨 **Portfolio:** [ቻናሉን ቴሌግራም ላይ ክፈት](https://t.me/Real_Works_Ethiopia)\n\n"
             "👇 *እባክዎ የሚፈልጉትን አገልግሎት በመምረጥ በፍጥነት ይዘዙ:*"
         ),
         'btn_design': "🖼 የ1 ሰዓት ፈጣን ዲዛይን (Fast Design)",
@@ -94,8 +94,8 @@ TEXTS = {
             "Hello **{name}**!\n\n"
             "Welcome to **RM Media | Result & Momentum**. 🚀\n\n"
             "📞 **Phone:** +251967830825\n"
-            "💬 **Telegram:** @Respect_for_God\n"
-            "🎨 **Portfolio:** @Real_Works_Ethiopia\n\n"
+            "💬 **Telegram:** [Click to Chat](https://t.me/Respect_for_God)\n"
+            "🎨 **Portfolio:** [Open Channel](https://t.me/Real_Works_Ethiopia)\n\n"
             "👇 *Select your desired service below to proceed instantly:*"
         ),
         'btn_design': "🖼 1-Hour Fast Design",
@@ -136,7 +136,6 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     lang = get_user_lang(user.id)
     t = TEXTS[lang]
 
-    # Clean, professional Livegram-style inline layout (Minimalist & Focused)
     keyboard = [
         [InlineKeyboardButton(t['btn_design'], callback_data="serv_design")],
         [InlineKeyboardButton(t['btn_video'], callback_data="serv_video")],
@@ -165,7 +164,6 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     lang = get_user_lang(user_id)
     t = TEXTS[lang]
 
-    # Frictionless 2-Click Funnel Implementation
     if data == "serv_design":
         markup = InlineKeyboardMarkup([
             [InlineKeyboardButton(t['order_now'], url="https://t.me/Respect_for_God")],

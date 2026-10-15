@@ -43,9 +43,8 @@ logger = logging.getLogger(__name__)
 
 DB_FILE = "rm_media_advanced.db"
 
-# 🛑 SECURITY SETTING: እዚህ ጋር የራስህን Telegram Numerical User ID ብቻ አስገባ!
-# (የቴሌግራም ID ህን ለማወቅ @userinfobot ን በቴሌግራም መጠቀም ትችላለህ)
-ADMIN_USER_ID = 2133585693  # 👈 እዚህ ጋር ቁጥርህን ተካ!
+# 🔒 SECURITY SETTING: የነጠላ ባለቤት (Admin) የቴሌግራም ID
+ADMIN_USER_ID = 2133585693
 
 def init_db():
     conn = sqlite3.connect(DB_FILE)
@@ -79,7 +78,6 @@ def init_db():
         )
     """)
     
-    # Auto-migration check for existing DBs
     cursor.execute("PRAGMA table_info(users)")
     columns = [column[1] for column in cursor.fetchall()]
     if 'phone_number' not in columns:
@@ -141,7 +139,9 @@ TEXTS = {
             "👤 **Account Name:** BIZUAYEHU MOGES MEKONNEN\n\n"
             "🔹 **Telebirr:** `0967830825`\n"
             "👤 **Name:** MOGES MEKONNEN\n\n"
-            "📸 *ክፍያ ከፈጸሙ በኋላ የደረሰኝ ፎቶ (Receipt Image) ወይም የትራንስፎርሜሽን ቁጥር እዚሁ ቦት ላይ ይላኩ።*"
+            "📸 **ክፍያ ከፈጸሙ በኋላ ቀጣይ ስቴፕ:**\n"
+            "1️⃣ የደረሰኝ ፎቶ (Receipt Image) ወይም የትራንስፎርሜሽን ቁጥር **እዚሁ ቦት ላይ ይላኩ**፤ ወይም\n"
+            "2️⃣ የትዕዛዝ ማረጋገጫዎን ለማፋጠን [ወዲያውኑ ስክሪንሾቱን እዚህ ይላኩልን (Direct Inbox)](https://t.me/Respect_for_God) 👈"
         ),
         'receipt_received': "✅ **የክፍያ ደረሰኝዎ ደርሶናል!**\n\nአመሰግናለን! በቅርብ ደቂቃዎች ውስጥ ክፍያዎ ተረጋግጦ ስራችንን እንጀምራለን። 🚀",
         'review_prompt': "✍️ **እባክዎን ስለ አገልግሎታችን ያለዎትን እውነተኛ አስተያየት (ቢያንስ 5 ፊደላት) ይጻፉልን:**",
@@ -198,7 +198,9 @@ TEXTS = {
             "👤 **Account Name:** BIZUAYEHU MOGES MEKONNEN\n\n"
             "🔹 **Telebirr:** `0967830825`\n"
             "👤 **Name:** MOGES MEKONNEN\n\n"
-            "📸 *Once paid, please upload your Receipt Screenshot right here in this chat.*"
+            "📸 **Next Step After Payment:**\n"
+            "1️⃣ Upload your Receipt Screenshot right here in this bot; or\n"
+            "2️⃣ Send screenshot directly to our expert: [Send Screenshot to Direct Inbox](https://t.me/Respect_for_God) 👈"
         ),
         'receipt_received': "✅ **Receipt Received!**\n\nThank you! Our team will verify your payment and start your project shortly. 🚀",
         'review_prompt': "✍️ **Please write your review (at least 5 characters) below:**",
@@ -268,7 +270,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     if user_id != ADMIN_USER_ID:
-        return  # ባለቤቱ ካልሆነ ምንም አይነት ምላሽ አይሰጥም (ባዶ ይተዋል)
+        return
 
     conn = sqlite3.connect(DB_FILE)
     cursor = conn.cursor()
@@ -291,7 +293,7 @@ async def stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
     await update.message.reply_text(stats_msg, parse_mode="Markdown")
 
-# 📢 ADMIN BROADCAST COMMAND (/broadcast Your Message)
+# 📢 ADMIN BROADCAST COMMAND (/broadcast መልእክት)
 async def broadcast(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     if user_id != ADMIN_USER_ID:

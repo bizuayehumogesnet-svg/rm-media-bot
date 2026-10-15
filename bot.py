@@ -8,6 +8,7 @@ from telegram import (
     InlineKeyboardMarkup,
     KeyboardButton,
     ReplyKeyboardMarkup,
+    ReplyKeyboardRemove,
     Update,
 )
 from telegram.ext import (
@@ -24,7 +25,7 @@ app = Flask('')
 
 @app.route('/')
 def home():
-    return "RM Media Fast 10x Sales Bot is Live!"
+    return "RM Media 10x Direct Order & Analytics Bot is Live!"
 
 def run():
     port = int(os.environ.get("PORT", 10000))
@@ -63,6 +64,15 @@ async def init_db():
                 approved INTEGER DEFAULT 1
             )
         """)
+        await db.execute("""
+            CREATE TABLE IF NOT EXISTS orders (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                user_id INTEGER,
+                service_name TEXT,
+                status TEXT DEFAULT 'pending',
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )
+        """)
         await db.commit()
 
 TEXTS = {
@@ -70,12 +80,13 @@ TEXTS = {
         'welcome': (
             "🔥 **የንግድዎን ሽያጭ እና እይታ በጥራት ያሳድጉ!** 🔥\n\n"
             "እንኳን ወደ **RM Media | Result & Momentum** በደህና መጡ። 🚀\n\n"
+            "⭐ *ከ 120+ በላይ እርካታ ያገኙ ደንበኞች የመረጡን የብራንዲንግ እና የቪዲዮ ፕሮዳክሽን ማዕከል!*\n\n"
             "📞 **የቀጥታ መስመር:** +251967830825\n"
             "💬 **የባለሙያ ምክክር:** [ከዋና አዘጋጁ ጋር ይወያዩ](https://t.me/Respect_for_God)\n"
             "🎨 **ፖርትፎሊዮ:** [የሰራናቸውን ስራዎች ይመልከቱ](https://t.me/Real_Works_Ethiopia)\n\n"
             "👇 *እባክዎን ከታች ከሚገኙት አማራጮች የሚፈልጉትን ይምረጡ:*"
         ),
-        'phone_prompt': "📱 እባክዎን ስልክ ቁጥርዎን ለማጋራት ከታች ያለውን አዝራር ይጫኑ (ለቀላል ግንኙነት):",
+        'phone_prompt': "👋 ሰላም {name}! አገልግሎታችንን ለመጀመር እባክዎን ከታች ያለውን አዝራር በመጫን ስልክ ቁጥርዎን ያጋሩት፡",
         'phone_btn': "📲 ስልክ ቁጥሬን አጋራ (Share Contact)",
         'skip_phone': "ዝለል / Skip ➡️",
         'btn_design': "🖼 የ1 ሰዓት ፈጣን ዲዛይን (ከ 1,500 ብር)",
@@ -86,7 +97,7 @@ TEXTS = {
         'btn_leave_review': "✍️ አስተያየት መስጠት",
         'btn_settings': "⚙️ ቋንቋ / Settings",
         'back_menu': "🔙 ወደ ዋናው ማውጫ",
-        'order_now': "🚀 አሁኑኑ ያዝዙ (ቅድሚያ ያግኙ)",
+        'order_now': "🚀 አሁኑኑ ያዝዙ (In-Bot Order)",
         'design_desc': (
             "🖼 **የ1 ሰዓት ፈጣን ዲዛይን እና የታምብሌን ፓኬጅ**\n\n"
             "💰 **ዋጋ:** 1,500 - 3,500 ብር\n\n"
@@ -99,31 +110,40 @@ TEXTS = {
             "💰 **ዋጋ:** 4,500 - 10,000 ብር\n\n"
             "• ተመልካቹን የሚማርክ የምረቃ እና የልደት ቪዲዮ ኤዲቲንግ\n"
             "• የንግድ ድርጅትዎን ሽያጭ የሚያነቃቁ የማስታወቂያ ቪዲዮዎች\n\n"
-            "⚡ *ከባለሙያው ጋር ለመነጋገር ከታች ያለውን ይጫኑ:*"
+            "⚡ *አሁኑኑ በማዘዝ ከባለሙያችን ጋር ይገናኙ:*"
         ),
         'social_desc': (
             "📱 **የሶሻል ሚዲያ ግብይት እና አስተዳደር (SMM)**\n\n"
             "💰 **ዋጋ:** 8,000 - 15,000 ብር / በወር\n\n"
             "• ሙሉ የገጽ አስተዳደር እና የይዘት ስትራቴጂ\n"
             "• ታዳሚዎን ወደ ቋሚ ደንበኛ የሚቀይር አሰራር\n\n"
-            "⚡ *ስትራቴጂክ ውይይት ለመጀመር ከታች ያለውን ይጫኑ:*"
+            "⚡ *አሁኑኑ በማዘዝ ስትራቴጂክ ውይይት ይጀምሩ:*"
         ),
-        'portfolio_desc': "🎨 **ኦፊሴላዊ የፖርትፎሊዮ ማህደር**\n\nእስካሁን የሰራናቸውን ከፍተኛ ጥራት ያላቸውን ስራዎች ከታች ባለው ሊንክ ይመልከቱ:",
-        'settings_title': "⚙️ **ቋንቋ ይምረጡ / Choose Language:**",
+        'checkout_text': (
+            "💳 **የትዕዛዝ እና የክፍያ ማረጋገጫ (Checkout)**\n\n"
+            "ትዕዛዝዎን ለማረጋገጥ እባክዎን በታች ያሉት የክፍያ አማራጮች ይጠቀሙ፡\n\n"
+            "🔹 **CBE (ኢትዮጵያ ንግድ ባንክ):** `1000570870487`\n"
+            "👤 **Account Name:** BIZUAYEHU MOGES MEKONNEN\n\n"
+            "🔹 **Telebirr:** `0967830825`\n"
+            "👤 **Name:** MOGES MEKONNEN\n\n"
+            "📸 *ክፍያ ከፈጸሙ በኋላ የደረሰኝ ፎቶ (Receipt Image) ወይም የትራንስፎርሜሽን ቁጥር እዚሁ ቦት ላይ ይላኩ።*"
+        ),
+        'receipt_received': "✅ **የክፍያ ደረሰኝዎ ደርሶናል!**\n\nአመሰግናለን! በቅርብ ደቂቃዎች ውስጥ ክፍያዎ ተረጋግጦ ስራችንን እንጀምራለን። 🚀",
         'review_prompt': "✍️ **እባክዎን ስለ አገልግሎታችን ያለዎትን እውነተኛ አስተያየት (ቢያንስ 5 ፊደላት) ይጻፉልን:**",
-        'review_error': "⚠️ **ማሳሰቢያ:** የጻፉት አስተያየት አጭርពេዟል። እባክዎን ትርጉም ያለው አስተያየት በድጋሚ ይጻፉ:",
+        'review_error': "⚠️ **ማሳሰቢያ:** የጻፉት አስተያየት አጭር ነው። እባክዎን ትርጉም ያለው አስተያየት በድጋሚ ይጻፉ:",
         'review_success': "🎉 **አስተያየትዎ በተሳካ ሁኔታ ተመዝግቧል! እናመሰግናለን።** 🚀"
     },
     'en': {
         'welcome': (
             "🔥 **Elevate Your Brand & Double Your Sales!** 🔥\n\n"
             "Welcome to **RM Media | Result & Momentum**. 🚀\n\n"
+            "⭐ *Trusted by 120+ Verified Clients across Ethiopia!*\n\n"
             "📞 **Direct Line:** +251967830825\n"
             "💬 **Direct Consultation:** [Chat with Lead Expert](https://t.me/Respect_for_God)\n"
             "🎨 **Portfolio:** [Explore Our Works](https://t.me/Real_Works_Ethiopia)\n\n"
             "👇 *Choose a service below to transform your business:*"
         ),
-        'phone_prompt': "📱 Please share your phone number using the button below for quick communication:",
+        'phone_prompt': "👋 Hello {name}! To get started, please share your phone number using the button below:",
         'phone_btn': "📲 Share Contact",
         'skip_phone': "Skip ➡️",
         'btn_design': "🖼 1-Hour Fast Design (From 1,500 ETB)",
@@ -134,7 +154,7 @@ TEXTS = {
         'btn_leave_review': "✍️ Leave a Review",
         'btn_settings': "⚙️ Language / Settings",
         'back_menu': "🔙 Main Menu",
-        'order_now': "🚀 Order Now (High Priority)",
+        'order_now': "🚀 Order Now (In-Bot Order)",
         'design_desc': (
             "🖼 **1-Hour Fast Design & Thumbnails Package**\n\n"
             "💰 **Price:** 1,500 - 3,500 ETB\n\n"
@@ -147,17 +167,25 @@ TEXTS = {
             "💰 **Price:** 4,500 - 10,000 ETB\n\n"
             "• Engaging Graduation & Birthday Video Editing\n"
             "• Commercial Promo Videos to Boost Sales\n\n"
-            "⚡ *Click below to consult with our experts:*"
+            "⚡ *Order now to consult directly with our expert:*"
         ),
         'social_desc': (
             "📱 **Social Media Marketing & SMM Retainer**\n\n"
             "💰 **Price:** 8,000 - 15,000 ETB / Month\n\n"
             "• Full Page Management & Content Strategy\n"
             "• Systems designed to convert audience into loyal clients\n\n"
-            "⚡ *Click below to book a strategy session:*"
+            "⚡ *Order now to start your strategy session:*"
         ),
-        'portfolio_desc': "🎨 **Official Portfolio Archive**\n\nReview our high-quality works in our channel below:",
-        'settings_title': "⚙️ **Choose Language / ቋንቋ ይምረጡ:**",
+        'checkout_text': (
+            "💳 **In-Bot Order & Payment Confirmation**\n\n"
+            "To confirm your order, please process payment to:\n\n"
+            "🔹 **CBE Bank:** `1000570870487`\n"
+            "👤 **Account Name:** BIZUAYEHU MOGES MEKONNEN\n\n"
+            "🔹 **Telebirr:** `0967830825`\n"
+            "👤 **Name:** MOGES MEKONNEN\n\n"
+            "📸 *Once paid, please upload your Receipt Screenshot right here in this chat.*"
+        ),
+        'receipt_received': "✅ **Receipt Received!**\n\nThank you! Our team will verify your payment and start your project shortly. 🚀",
         'review_prompt': "✍️ **Please write your review (at least 5 characters) below:**",
         'review_error': "⚠️ **Notice:** Your review is too short. Please write a meaningful review:",
         'review_success': "🎉 **Your review has been successfully recorded! Thank you.** 🚀"
@@ -165,7 +193,6 @@ TEXTS = {
 }
 
 async def get_user_lang_cached(user_id, context: ContextTypes.DEFAULT_TYPE):
-    """የቋንቋ መረጃን በሜሞሪ (Cache) በመያዝ ዳታቤዝ እንዳይጠራና ቦቱ እንዲፈጥን ማድረግ"""
     if "lang" in context.user_data:
         return context.user_data["lang"]
     
@@ -201,7 +228,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     lang = await get_user_lang_cached(user.id, context)
     t = TEXTS.get(lang, TEXTS['am'])
 
-    # Lead Capture Check
+    # Lead Capture: Ask phone if not captured
     async with aiosqlite.connect(DB_FILE) as db:
         async with db.execute("SELECT phone_number FROM users WHERE user_id = ?", (user.id,)) as cursor:
             row = await cursor.fetchone()
@@ -212,7 +239,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     one_time_keyboard=True
                 )
                 if update.message:
-                    await update.message.reply_text(t['phone_prompt'], reply_markup=reply_markup)
+                    await update.message.reply_text(t['phone_prompt'].format(name=user.first_name), reply_markup=reply_markup)
                 return
 
     welcome_text = t['welcome'].format(name=user.first_name)
@@ -224,9 +251,29 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         query = update.callback_query
         await query.edit_message_text(welcome_text, reply_markup=reply_markup, parse_mode="Markdown")
 
+# Admin Analytics Handler
+async def stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    async with aiosqlite.connect(DB_FILE) as db:
+        async with db.execute("SELECT COUNT(*) FROM users") as c1:
+            total_users = (await c1.fetchone())[0]
+        async with db.execute("SELECT COUNT(*) FROM users WHERE phone_number IS NOT NULL AND phone_number != 'SKIPPED'") as c2:
+            phone_leads = (await c2.fetchone())[0]
+        async with db.execute("SELECT COUNT(*) FROM reviews") as c3:
+            total_reviews = (await c3.fetchone())[0]
+        async with db.execute("SELECT COUNT(*) FROM orders") as c4:
+            total_orders = (await c4.fetchone())[0]
+
+    stats_msg = (
+        "📊 **RM Media Analytics & Funnel Stats**\n\n"
+        f"👥 **አጠቃላይ የቦት ተጠቃሚዎች:** {total_users}\n"
+        f"📱 **የተመዘገቡ ስልክ ቁጥሮች (Leads):** {phone_leads}\n"
+        f"🛒 **የተደረጉ አጠቃላይ ትዕዛዞች:** {total_orders}\n"
+        f"⭐ **የተጻፉ ሪቪውዎች:** {total_reviews}\n"
+    )
+    await update.message.reply_text(stats_msg, parse_mode="Markdown")
+
 async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
-    # ⚡ 1. በቅጽበት መልስ መስጠት (Loading Spinner ን ወዲያው ለማጥፋት)
     await query.answer()
 
     data = query.data
@@ -234,27 +281,24 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     lang = await get_user_lang_cached(user_id, context)
     t = TEXTS.get(lang, TEXTS['am'])
 
-    # ⚡ 2. ፈጣን አዝራሮች ምላሽ (Instant UI Switching)
-    if data == "serv_design":
+    if data in ["serv_design", "serv_video", "serv_social"]:
+        service_key = data.replace("serv_", "")
+        desc_key = f"{service_key}_desc"
         markup = InlineKeyboardMarkup([
-            [InlineKeyboardButton(t['order_now'], url="https://t.me/Respect_for_God")],
+            [InlineKeyboardButton(t['order_now'], callback_data=f"order_{service_key}")],
             [InlineKeyboardButton(t['back_menu'], callback_data="main_menu")],
         ])
-        await query.edit_message_text(t['design_desc'], reply_markup=markup, parse_mode="Markdown")
+        await query.edit_message_text(t[desc_key], reply_markup=markup, parse_mode="Markdown")
 
-    elif data == "serv_video":
-        markup = InlineKeyboardMarkup([
-            [InlineKeyboardButton(t['order_now'], url="https://t.me/Respect_for_God")],
-            [InlineKeyboardButton(t['back_menu'], callback_data="main_menu")],
-        ])
-        await query.edit_message_text(t['video_desc'], reply_markup=markup, parse_mode="Markdown")
+    elif data.startswith("order_"):
+        service_name = data.replace("order_", "")
+        async with aiosqlite.connect(DB_FILE) as db:
+            await db.execute("INSERT INTO orders (user_id, service_name) VALUES (?, ?)", (user_id, service_name))
+            await db.commit()
 
-    elif data == "serv_social":
-        markup = InlineKeyboardMarkup([
-            [InlineKeyboardButton(t['order_now'], url="https://t.me/Respect_for_God")],
-            [InlineKeyboardButton(t['back_menu'], callback_data="main_menu")],
-        ])
-        await query.edit_message_text(t['social_desc'], reply_markup=markup, parse_mode="Markdown")
+        context.user_data["waiting_for_receipt"] = True
+        markup = InlineKeyboardMarkup([[InlineKeyboardButton(t['back_menu'], callback_data="main_menu")]])
+        await query.edit_message_text(t['checkout_text'], reply_markup=markup, parse_mode="Markdown")
 
     elif data == "serv_portfolio":
         markup = InlineKeyboardMarkup([
@@ -292,24 +336,19 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             ],
             [InlineKeyboardButton(t['back_menu'], callback_data="main_menu")],
         ])
-        await query.edit_message_text(t['settings_title'], reply_markup=markup, parse_mode="Markdown")
+        await query.edit_message_text("⚙️ **ቋንቋ ይምረጡ / Choose Language:**", reply_markup=markup, parse_mode="Markdown")
 
-    elif data == "lang_am":
-        context.user_data["lang"] = "am"
+    elif data in ["lang_am", "lang_en"]:
+        new_lang = "am" if data == "lang_am" else "en"
+        context.user_data["lang"] = new_lang
         async with aiosqlite.connect(DB_FILE) as db:
-            await db.execute("UPDATE users SET language = 'am' WHERE user_id = ?", (user_id,))
+            await db.execute("UPDATE users SET language = ? WHERE user_id = ?", (new_lang, user_id))
             await db.commit()
-        await query.edit_message_text(TEXTS['am']['welcome'].format(name=query.from_user.first_name), reply_markup=build_main_keyboard(TEXTS['am']), parse_mode="Markdown")
-
-    elif data == "lang_en":
-        context.user_data["lang"] = "en"
-        async with aiosqlite.connect(DB_FILE) as db:
-            await db.execute("UPDATE users SET language = 'en' WHERE user_id = ?", (user_id,))
-            await db.commit()
-        await query.edit_message_text(TEXTS['en']['welcome'].format(name=query.from_user.first_name), reply_markup=build_main_keyboard(TEXTS['en']), parse_mode="Markdown")
+        await query.edit_message_text(TEXTS[new_lang]['welcome'].format(name=query.from_user.first_name), reply_markup=build_main_keyboard(TEXTS[new_lang]), parse_mode="Markdown")
 
     elif data == "main_menu":
         context.user_data["waiting_for_review"] = False
+        context.user_data["waiting_for_receipt"] = False
         welcome_text = t['welcome'].format(name=query.from_user.first_name)
         await query.edit_message_text(welcome_text, reply_markup=build_main_keyboard(t), parse_mode="Markdown")
 
@@ -318,24 +357,34 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     lang = await get_user_lang_cached(user.id, context)
     t = TEXTS.get(lang, TEXTS['am'])
 
+    # Contact Sharing
     if update.message.contact:
         phone = update.message.contact.phone_number
         async with aiosqlite.connect(DB_FILE) as db:
             await db.execute("UPDATE users SET phone_number = ? WHERE user_id = ?", (phone, user.id))
             await db.commit()
         
-        await update.message.reply_text("✅ እናመሰግናለን! ስልክ ቁጥርዎ ተመዝግቧል።", reply_markup=ReplyKeyboardMarkup([[]], remove_keyboard=True))
+        await update.message.reply_text("✅ እናመሰግናለን! ስልክ ቁጥርዎ ተመዝግቧል።", reply_markup=ReplyKeyboardRemove())
         await start(update, context)
         return
 
+    # Skip Contact
     if update.message.text in ["ዝለል / Skip ➡️", "Skip ➡️"]:
         async with aiosqlite.connect(DB_FILE) as db:
             await db.execute("UPDATE users SET phone_number = 'SKIPPED' WHERE user_id = ?", (user.id,))
             await db.commit()
-        await update.message.reply_text("እንቀጥል...", reply_markup=ReplyKeyboardMarkup([[]], remove_keyboard=True))
+        await update.message.reply_text("እንቀጥል...", reply_markup=ReplyKeyboardRemove())
         await start(update, context)
         return
 
+    # Handle Receipt Photo/Message Upload
+    if context.user_data.get("waiting_for_receipt"):
+        context.user_data["waiting_for_receipt"] = False
+        await update.message.reply_text(t['receipt_received'], parse_mode="Markdown")
+        await start(update, context)
+        return
+
+    # Handle Review
     if context.user_data.get("waiting_for_review"):
         review_text = update.message.text
         if not review_text or len(review_text.strip()) < 5:
@@ -362,10 +411,11 @@ def main():
     app = ApplicationBuilder().token(TOKEN).build()
 
     app.add_handler(CommandHandler("start", start))
+    app.add_handler(CommandHandler("stats", stats))
     app.add_handler(CallbackQueryHandler(button_handler))
-    app.add_handler(MessageHandler(filters.TEXT | filters.CONTACT, handle_message))
+    app.add_handler(MessageHandler(filters.ALL, handle_message))
 
-    print("RM Media Ultra-Fast Sales Bot Engine Running 24/7...")
+    print("RM Media 10x Full Automation Bot Running 24/7...")
     app.run_polling()
 
 if __name__ == "__main__":

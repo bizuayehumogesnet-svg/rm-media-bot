@@ -16,7 +16,7 @@ app = Flask('')
 
 @app.route('/')
 def home():
-    return "Frictionless Sales Funnel Bot is running!"
+    return "Elite RM Media Bot is running!"
 
 def run():
     port = int(os.environ.get("PORT", 10000))
@@ -64,52 +64,52 @@ def init_db():
 
 init_db()
 
-# የቋንቋ መዝገበ-ቃላት (Localization Dictionary) - Markdown Underscore Fix
+# የቋንቋ መዝገበ-ቃላት (Elite Psychological Copywriting)
 TEXTS = {
     'am': {
         'welcome': (
             "ሰላም **{name}**!\n\n"
             "እንኳን ወደ **RM Media | Result & Momentum** በደህና መጡ። 🚀\n\n"
-            "📞 **Phone / ስልክ:** +251967830825\n"
-            "💬 **Telegram:** [ንኪና አግኘኝ](https://t.me/Respect_for_God)\n"
-            "🎨 **Portfolio:** [ቻናሉን ቴሌግራም ላይ ክፈት](https://t.me/Real_Works_Ethiopia)\n\n"
-            "👇 *እባክዎ የሚፈልጉትን አገልግሎት በመምረጥ በፍጥነት ይዘዙ:*"
+            "📞 **የቀጥታ መስመር:** +251967830825\n"
+            "💬 **የባለሙያ ምክክር:** [የፕሮጀክት ውይይት ይጀምሩ](https://t.me/Respect_for_God)\n"
+            "🎨 **የብራንድ ማህደር:** [የጥራት እና የፈጠራ ማህደራችንን ይጎብኙ](https://t.me/Real_Works_Ethiopia)\n\n"
+            "👇 *ብራንድዎን ወደ ላቀ ከፍታ የሚወስደውን ፕሮፌሽናል አገልግሎት ይምረጡ:*"
         ),
-        'btn_design': "🖼 የ1 ሰዓት ፈጣን ዲዛይን (Fast Design)",
-        'btn_video': "🎬 የቪዲዮ ፕሮዳክሽን (Video Production)",
-        'btn_social': "📱 የሶሻል ሚዲያ አስተዳደር (Social Media)",
-        'btn_portfolio': "🎨 የቀደሙ ስራዎች (Portfolio)",
-        'btn_reviews': "⭐ የደንበኞች አስተያየት (Reviews)",
+        'btn_design': "🖼 የ1 ሰዓት ፈጣን ዲዛይን እና ብራንዲንግ",
+        'btn_video': "🎬 የቪዲዮ ፕሮዳክሽን እና ሲነማቲክ ኤዲት",
+        'btn_social': "📱 የሶሻል ሚዲያ ግብይት እና አስተዳደር",
+        'btn_portfolio': "🎨 የጥራት እና ስራዎች ማህደር (Portfolio)",
+        'btn_reviews': "⭐ የደንበኞች የተረጋገጠ እምነት (Reviews)",
         'btn_settings': "⚙️ ቋንቋ / Settings",
-        'back_menu': "🔙 ወደ ዋናው ምናሌ",
-        'order_now': "📥 አሁኑኑ ትዕዛዝ ይስጡ (Order Now)",
-        'design_desc': "🖼 **የ1 ሰዓት ፈጣን ዲዛይን እና ታምብሌን**\n\n- የዩቲዩብ እና ቲክቶክ ታምብሌኖች\n- ማራኪ የሶሻል ሚዲያ ፖስተሮች\n\n⚡ *ፈጣን አገልግሎት ለማግኘት ከታች ያለውን ይጫኑ:*",
-        'video_desc': "🎬 **የቪዲዮ ፕሮዳክሽን እና ፕሮሞ ኤዲት**\n\n- የምረቃ እና የልደት ቪዲዮ ኤዲቲንግ\n- የንግድ ድርጅት ማስታወቂያ ቪዲዮዎች\n\n⚡ *ትዕዛዝ ለማስተላለፍ ከታች ያለውን ይጫኑ:*",
-        'social_desc': "📱 **የሶሻል ሚዲያ አስተዳደር (SMM)**\n\n- ሙሉ የገጽ (Page) አስተዳደር\n- የይዘት ስትራቴጂ እና የጊዜ ሰሌዳ\n\n⚡ *ውይይት ለመጀመር ከታች ያለውን ይጫኑ:*",
-        'portfolio_desc': "🎨 **ኦፊሴላዊ የፖርትፎሊዮ ማህደር**\n\nጥራት ያላቸው ስራዎቻችንን ከታች ባለው ቻናል ይመለከታሉ:",
+        'back_menu': "🔙 ወደ ዋናው ማውጫ ተመለስ",
+        'order_now': "📥 የፕሮጀክት ስራ ያስጀምሩ (Start Project)",
+        'design_desc': "🖼 **የ1 ሰዓት ፈጣን ዲዛይን እና ታምብሌን**\n\n- ከፍተኛ ትኩረት (Attention) የሚስቡ የዩቲዩብ እና ቲክቶክ ታምብሌኖች\n- የንግድዎን እሴት ከፍ የሚያደርጉ ማራኪ ፖስተሮች\n\n⚡ *ብቁ እና ፈጣን አገልግሎት ለማግኘት ከታች ያለውን ይጫኑ:*",
+        'video_desc': "🎬 **የቪዲዮ ፕሮዳክሽን እና ፕሮሞ ኤዲት**\n\n- ተመልካቹን የሚማርክ የምረቃ እና የልደት ቪዲዮ ኤዲቲንግ\n- የንግድ ድርጅትዎን ሽያጭ የሚያነቃቁ የማስታወቂያ ቪዲዮዎች\n\n⚡ *ከባለሙያው ጋር ለመነጋገር ከታች ያለውን ይጫኑ:*",
+        'social_desc': "📱 **የሶሻል ሚዲያ ግብይት እና አስተዳደር (SMM)**\n\n- ሙሉ የገጽ (Page) አስተዳደር እና የይዘት ስትራቴጂ\n- ታዳሚዎን ወደ ቋሚ ደንበኛ የሚቀይር አሰራር\n\n⚡ *ስትራቴጂክ ውይይት ለመጀመር ከታች ያለውን ይጫኑ:*",
+        'portfolio_desc': "🎨 **ኦፊሴላዊ የፖርትፎሊዮ ማህደር**\n\nእስካሁን የሰራናቸውን ከፍተኛ ጥራት ያላቸውን ስራዎች ከታች ባለው ሊንክ ይመልከቱ:",
         'settings_title': "⚙️ **ቋንቋ ይምረጡ / Choose Language:**"
     },
     'en': {
         'welcome': (
             "Hello **{name}**!\n\n"
             "Welcome to **RM Media | Result & Momentum**. 🚀\n\n"
-            "📞 **Phone:** +251967830825\n"
-            "💬 **Telegram:** [Click to Chat](https://t.me/Respect_for_God)\n"
-            "🎨 **Portfolio:** [Open Channel](https://t.me/Real_Works_Ethiopia)\n\n"
-            "👇 *Select your desired service below to proceed instantly:*"
+            "📞 **Direct Line:** +251967830825\n"
+            "💬 **Expert Consultation:** [Start Project Discussion](https://t.me/Respect_for_God)\n"
+            "🎨 **Brand Archive:** [Explore Portfolio Archive](https://t.me/Real_Works_Ethiopia)\n\n"
+            "👇 *Select your desired professional service below to elevate your brand:*"
         ),
-        'btn_design': "🖼 1-Hour Fast Design",
-        'btn_video': "🎬 Video Production",
-        'btn_social': "📱 Social Media Management",
-        'btn_portfolio': "🎨 Portfolio Showcase",
-        'btn_reviews': "⭐ Client Reviews",
+        'btn_design': "🖼 1-Hour Fast Design & Branding",
+        'btn_video': "🎬 Video Production & Cinematic Edit",
+        'btn_social': "📱 Social Media Marketing & Management",
+        'btn_portfolio': "🎨 Official Portfolio Archive",
+        'btn_reviews': "⭐ Verified Client Testimonials",
         'btn_settings': "⚙️ Language / Settings",
         'back_menu': "🔙 Back to Main Menu",
-        'order_now': "📥 Order Now",
-        'design_desc': "🖼 **1-Hour Fast Design & Thumbnails**\n\n- YouTube & TikTok Thumbnails\n- Attractive Social Media Posters\n\n⚡ *Click below for instant order:*",
-        'video_desc': "🎬 **Video Production & Promo Edit**\n\n- Graduation & Birthday Video Editing\n- Commercial Promo Videos\n\n⚡ *Click below to contact us:*",
-        'social_desc': "📱 **Social Media Management (SMM)**\n\n- Full Page Management\n- Content Strategy & Scheduling\n\n⚡ *Click below to book consultation:*",
-        'portfolio_desc': "🎨 **Official Portfolio Archive**\n\nCheck out our high-quality works in our channel below:",
+        'order_now': "📥 Initiate Your Project",
+        'design_desc': "🖼 **1-Hour Fast Design & Thumbnails**\n\n- High-Attention YouTube & TikTok Thumbnails\n- High-Impact Social Media Posters\n\n⚡ *Click below to initiate your order:*",
+        'video_desc': "🎬 **Video Production & Promo Edit**\n\n- Engaging Graduation & Birthday Video Editing\n- Commercial Promo Videos to Boost Sales\n\n⚡ *Click below to consult with our experts:*",
+        'social_desc': "📱 **Social Media Marketing & SMM**\n\n- Full Page Management & Content Strategy\n- Systems designed to convert audience into loyal clients\n\n⚡ *Click below to book a strategy session:*",
+        'portfolio_desc': "🎨 **Official Portfolio Archive**\n\nReview our high-quality works in our channel below:",
         'settings_title': "⚙️ **Choose Language / ቋንቋ ይምረጡ:**"
     }
 }
@@ -187,7 +187,7 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     elif data == "serv_portfolio":
         markup = InlineKeyboardMarkup([
-            [InlineKeyboardButton("🔗 ቻናሉን ይጎብኙ (Visit Channel)", url="https://t.me/Real_Works_Ethiopia")],
+            [InlineKeyboardButton("🔗 የጥራት ማህደራችንን ይጎብኙ (Explore Archive)", url="https://t.me/Real_Works_Ethiopia")],
             [InlineKeyboardButton(t['back_menu'], callback_data="main_menu")],
         ])
         await query.edit_message_text(t['portfolio_desc'], reply_markup=markup, parse_mode="Markdown")
@@ -199,7 +199,7 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         rows = cursor.fetchall()
         conn.close()
 
-        rev_text = "⭐ **Client Testimonials / የደንበኞች አስተያየት** ⭐\n\n"
+        rev_text = "⭐ **Verified Client Testimonials / የተረጋገጡ የደንበኞች ግምገማዎች** ⭐\n\n"
         for name, rating, r_text in rows:
             stars = "⭐" * rating
             rev_text += f"👤 **{name}** {stars}\n💬 \"{r_text}\"\n\n"
@@ -244,7 +244,7 @@ def main():
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CallbackQueryHandler(button_handler))
 
-    print("Advanced Frictionless RM Media Bot is up and running 24/7...")
+    print("Elite RM Media Bot is up and running 24/7...")
     app.run_polling()
 
 if __name__ == "__main__":

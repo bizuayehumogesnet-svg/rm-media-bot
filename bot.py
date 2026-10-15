@@ -1,6 +1,6 @@
 import os
 import logging
-import aiosqlite
+import sqlite3
 from flask import Flask
 from threading import Thread
 from telegram import (
@@ -25,7 +25,7 @@ app = Flask('')
 
 @app.route('/')
 def home():
-    return "RM Media 10x Direct Order & Analytics Bot is Live!"
+    return "RM Media 10x Full Automated Bot is Live!"
 
 def run():
     port = int(os.environ.get("PORT", 10000))
@@ -43,37 +43,41 @@ logger = logging.getLogger(__name__)
 
 DB_FILE = "rm_media_advanced.db"
 
-async def init_db():
-    async with aiosqlite.connect(DB_FILE) as db:
-        await db.execute("""
-            CREATE TABLE IF NOT EXISTS users (
-                user_id INTEGER PRIMARY KEY,
-                full_name TEXT,
-                phone_number TEXT,
-                language TEXT DEFAULT 'am',
-                joined_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-            )
-        """)
-        await db.execute("""
-            CREATE TABLE IF NOT EXISTS reviews (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                user_id INTEGER,
-                full_name TEXT,
-                rating INTEGER,
-                review_text TEXT,
-                approved INTEGER DEFAULT 1
-            )
-        """)
-        await db.execute("""
-            CREATE TABLE IF NOT EXISTS orders (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                user_id INTEGER,
-                service_name TEXT,
-                status TEXT DEFAULT 'pending',
-                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-            )
-        """)
-        await db.commit()
+def init_db():
+    conn = sqlite3.connect(DB_FILE)
+    cursor = conn.cursor()
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS users (
+            user_id INTEGER PRIMARY KEY,
+            full_name TEXT,
+            phone_number TEXT,
+            language TEXT DEFAULT 'am',
+            joined_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        )
+    """)
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS reviews (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            user_id INTEGER,
+            full_name TEXT,
+            rating INTEGER,
+            review_text TEXT,
+            approved INTEGER DEFAULT 1
+        )
+    """)
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS orders (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            user_id INTEGER,
+            service_name TEXT,
+            status TEXT DEFAULT 'pending',
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        )
+    """)
+    conn.commit()
+    conn.close()
+
+init_db()
 
 TEXTS = {
     'am': {
@@ -148,7 +152,7 @@ TEXTS = {
         'skip_phone': "Skip ➡️",
         'btn_design': "🖼 1-Hour Fast Design (From 1,500 ETB)",
         'btn_video': "🎬 Video Production (From 4,500 ETB)",
-        'btn_social': "📱 Social Media Marketing (SMM)",
+        'btn_social': "📱 Social Media Marketing (8,000 - 15,000 ETB)",
         'btn_portfolio': "🎨 Official Portfolio Archive",
         'btn_reviews': "⭐ Verified Client Testimonials",
         'btn_leave_review': "✍️ Leave a Review",
@@ -192,16 +196,13 @@ TEXTS = {
     }
 }
 
-async def get_user_lang_cached(user_id, context: ContextTypes.DEFAULT_TYPE):
-    if "lang" in context.user_data:
-        return context.user_data["lang"]
-    
-    async with aiosqlite.connect(DB_FILE) as db:
-        async with db.execute("SELECT language FROM users WHERE user_id = ?", (user_id,)) as cursor:
-            row = await cursor.fetchone()
-            lang = row[0] if row else 'am'
-            context.user_data["lang"] = lang
-            return lang
+def get_user_lang(user_id):
+    conn = sqlite3.connect(DB_FILE)
+    cursor = conn.cursor()
+    cursor.execute("SELECT language FROM users WHERE user_id = ?", (user_id,))
+    row = cursor.fetchone()
+    conn.close()
+    return row[0] if row else 'am'
 
 def build_main_keyboard(t):
     return InlineKeyboardMarkup([
@@ -218,29 +219,30 @@ def build_main_keyboard(t):
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
-    async with aiosqlite.connect(DB_FILE) as db:
-        await db.execute(
-            "INSERT OR IGNORE INTO users (user_id, full_name) VALUES (?, ?)",
-            (user.id, user.full_name),
-        )
-        await db.commit()
+    conn = sqlite3.connect(DB_FILE)
+    cursor = conn.cursor()
+    cursor.execute(
+        "INSERT OR IGNORE INTO users (user_id, full_name) VALUES (?, ?)",
+        (user.id, user.full_name),
+    )
+    conn.commit()
 
-    lang = await get_user_lang_cached(user.id, context)
+    lang = get_user_lang(user.id)
     t = TEXTS.get(lang, TEXTS['am'])
 
-    # Lead Capture: Ask phone if not captured
-    async with aiosqlite.connect(DB_FILE) as db:
-        async with db.execute("SELECT phone_number FROM users WHERE user_id = ?", (user.id,)) as cursor:
-            row = await cursor.fetchone()
-            if row and not row[0]:
-                reply_markup = ReplyKeyboardMarkup(
-                    [[KeyboardButton(t['phone_btn'], request_contact=True)], [KeyboardButton(t['skip_phone'])]],
-                    resize_keyboard=True,
-                    one_time_keyboard=True
-                )
-                if update.message:
-                    await update.message.reply_text(t['phone_prompt'].format(name=user.first_name), reply_markup=reply_markup)
-                return
+    cursor.execute("SELECT phone_number FROM users WHERE user_id = ?", (user.id,))
+    row = cursor.fetchone()
+    conn.close()
+
+    if row and not row[0]:
+        reply_markup = ReplyKeyboardMarkup(
+            [[KeyboardButton(t['phone_btn'], request_contact=True)], [KeyboardButton(t['skip_phone'])]],
+            resize_keyboard=True,
+            one_time_keyboard=True
+        )
+        if update.message:
+            await update.message.reply_text(t['phone_prompt'].format(name=user.first_name), reply_markup=reply_markup)
+        return
 
     welcome_text = t['welcome'].format(name=user.first_name)
     reply_markup = build_main_keyboard(t)
@@ -251,17 +253,18 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         query = update.callback_query
         await query.edit_message_text(welcome_text, reply_markup=reply_markup, parse_mode="Markdown")
 
-# Admin Analytics Handler
 async def stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    async with aiosqlite.connect(DB_FILE) as db:
-        async with db.execute("SELECT COUNT(*) FROM users") as c1:
-            total_users = (await c1.fetchone())[0]
-        async with db.execute("SELECT COUNT(*) FROM users WHERE phone_number IS NOT NULL AND phone_number != 'SKIPPED'") as c2:
-            phone_leads = (await c2.fetchone())[0]
-        async with db.execute("SELECT COUNT(*) FROM reviews") as c3:
-            total_reviews = (await c3.fetchone())[0]
-        async with db.execute("SELECT COUNT(*) FROM orders") as c4:
-            total_orders = (await c4.fetchone())[0]
+    conn = sqlite3.connect(DB_FILE)
+    cursor = conn.cursor()
+    cursor.execute("SELECT COUNT(*) FROM users")
+    total_users = cursor.fetchone()[0]
+    cursor.execute("SELECT COUNT(*) FROM users WHERE phone_number IS NOT NULL AND phone_number != 'SKIPPED'")
+    phone_leads = cursor.fetchone()[0]
+    cursor.execute("SELECT COUNT(*) FROM reviews")
+    total_reviews = cursor.fetchone()[0]
+    cursor.execute("SELECT COUNT(*) FROM orders")
+    total_orders = cursor.fetchone()[0]
+    conn.close()
 
     stats_msg = (
         "📊 **RM Media Analytics & Funnel Stats**\n\n"
@@ -278,7 +281,7 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     data = query.data
     user_id = query.from_user.id
-    lang = await get_user_lang_cached(user_id, context)
+    lang = get_user_lang(user_id)
     t = TEXTS.get(lang, TEXTS['am'])
 
     if data in ["serv_design", "serv_video", "serv_social"]:
@@ -292,9 +295,11 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     elif data.startswith("order_"):
         service_name = data.replace("order_", "")
-        async with aiosqlite.connect(DB_FILE) as db:
-            await db.execute("INSERT INTO orders (user_id, service_name) VALUES (?, ?)", (user_id, service_name))
-            await db.commit()
+        conn = sqlite3.connect(DB_FILE)
+        cursor = conn.cursor()
+        cursor.execute("INSERT INTO orders (user_id, service_name) VALUES (?, ?)", (user_id, service_name))
+        conn.commit()
+        conn.close()
 
         context.user_data["waiting_for_receipt"] = True
         markup = InlineKeyboardMarkup([[InlineKeyboardButton(t['back_menu'], callback_data="main_menu")]])
@@ -308,9 +313,11 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await query.edit_message_text(t['portfolio_desc'], reply_markup=markup, parse_mode="Markdown")
 
     elif data == "show_reviews":
-        async with aiosqlite.connect(DB_FILE) as db:
-            async with db.execute("SELECT full_name, rating, review_text FROM reviews WHERE approved = 1 ORDER BY id DESC LIMIT 3") as cursor:
-                rows = await cursor.fetchall()
+        conn = sqlite3.connect(DB_FILE)
+        cursor = conn.cursor()
+        cursor.execute("SELECT full_name, rating, review_text FROM reviews WHERE approved = 1 ORDER BY id DESC LIMIT 3")
+        rows = cursor.fetchall()
+        conn.close()
 
         rev_text = "⭐ **Verified Client Testimonials / የተረጋገጡ የደንበኞች ግምገማዎች** ⭐\n\n"
         for name, rating, r_text in rows:
@@ -340,10 +347,11 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     elif data in ["lang_am", "lang_en"]:
         new_lang = "am" if data == "lang_am" else "en"
-        context.user_data["lang"] = new_lang
-        async with aiosqlite.connect(DB_FILE) as db:
-            await db.execute("UPDATE users SET language = ? WHERE user_id = ?", (new_lang, user_id))
-            await db.commit()
+        conn = sqlite3.connect(DB_FILE)
+        cursor = conn.cursor()
+        cursor.execute("UPDATE users SET language = ? WHERE user_id = ?", (new_lang, user_id))
+        conn.commit()
+        conn.close()
         await query.edit_message_text(TEXTS[new_lang]['welcome'].format(name=query.from_user.first_name), reply_markup=build_main_keyboard(TEXTS[new_lang]), parse_mode="Markdown")
 
     elif data == "main_menu":
@@ -354,49 +362,51 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
-    lang = await get_user_lang_cached(user.id, context)
+    lang = get_user_lang(user.id)
     t = TEXTS.get(lang, TEXTS['am'])
 
-    # Contact Sharing
     if update.message.contact:
         phone = update.message.contact.phone_number
-        async with aiosqlite.connect(DB_FILE) as db:
-            await db.execute("UPDATE users SET phone_number = ? WHERE user_id = ?", (phone, user.id))
-            await db.commit()
+        conn = sqlite3.connect(DB_FILE)
+        cursor = conn.cursor()
+        cursor.execute("UPDATE users SET phone_number = ? WHERE user_id = ?", (phone, user.id))
+        conn.commit()
+        conn.close()
         
         await update.message.reply_text("✅ እናመሰግናለን! ስልክ ቁጥርዎ ተመዝግቧል።", reply_markup=ReplyKeyboardRemove())
         await start(update, context)
         return
 
-    # Skip Contact
     if update.message.text in ["ዝለል / Skip ➡️", "Skip ➡️"]:
-        async with aiosqlite.connect(DB_FILE) as db:
-            await db.execute("UPDATE users SET phone_number = 'SKIPPED' WHERE user_id = ?", (user.id,))
-            await db.commit()
+        conn = sqlite3.connect(DB_FILE)
+        cursor = conn.cursor()
+        cursor.execute("UPDATE users SET phone_number = 'SKIPPED' WHERE user_id = ?", (user.id,))
+        conn.commit()
+        conn.close()
         await update.message.reply_text("እንቀጥል...", reply_markup=ReplyKeyboardRemove())
         await start(update, context)
         return
 
-    # Handle Receipt Photo/Message Upload
     if context.user_data.get("waiting_for_receipt"):
         context.user_data["waiting_for_receipt"] = False
         await update.message.reply_text(t['receipt_received'], parse_mode="Markdown")
         await start(update, context)
         return
 
-    # Handle Review
     if context.user_data.get("waiting_for_review"):
         review_text = update.message.text
         if not review_text or len(review_text.strip()) < 5:
             await update.message.reply_text(t['review_error'])
             return
 
-        async with aiosqlite.connect(DB_FILE) as db:
-            await db.execute(
-                "INSERT INTO reviews (user_id, full_name, rating, review_text, approved) VALUES (?, ?, ?, ?, ?)",
-                (user.id, user.full_name, 5, review_text.strip(), 1),
-            )
-            await db.commit()
+        conn = sqlite3.connect(DB_FILE)
+        cursor = conn.cursor()
+        cursor.execute(
+            "INSERT INTO reviews (user_id, full_name, rating, review_text, approved) VALUES (?, ?, ?, ?, ?)",
+            (user.id, user.full_name, 5, review_text.strip(), 1),
+        )
+        conn.commit()
+        conn.close()
 
         context.user_data["waiting_for_review"] = False
         await update.message.reply_text(t['review_success'], parse_mode="Markdown")
@@ -404,9 +414,6 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 def main():
     keep_alive()
-    import asyncio
-    asyncio.run(init_db())
-
     TOKEN = os.getenv("BOT_TOKEN")
     app = ApplicationBuilder().token(TOKEN).build()
 

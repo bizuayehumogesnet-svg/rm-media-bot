@@ -158,7 +158,10 @@ TEXTS = {
         'order_label': "🧾 የትዕዛዝ ቁጥር",
         'order_confirmed': "✅ **ትዕዛዝዎ ተረጋግጧል!**\n\n🧾 ትዕዛዝ #{order_id}\nክፍያዎ ተረጋግጧል። ባለሙያችን ስራውን ጀምሯል፤ በቅርቡ እናገኝዎታለን። 🚀",
         'order_rejected': "❌ **ክፍያዎን ማረጋገጥ አልቻልንም**\n\n🧾 ትዕዛዝ #{order_id}\nእባክዎን ትክክለኛ ደረሰኝ ይላኩ ወይም በ[Direct Inbox](https://t.me/Respect_for_God) ያነጋግሩን።",
-        'no_reviews': "_እስካሁን የታተመ ግምገማ የለም።_\n\n"
+        'no_reviews': "_እስካሁን የታተመ ግምገማ የለም።_\n\n",
+        'review_pending': "\n\n🔎 _አስተያየትዎ በአድሚን ከተረጋገጠ በኋላ ይታተማል።_",
+        'rate_label': "ደረጃ",
+        'contact_not_own': "⚠️ እባክዎን የራስዎን ስልክ ቁጥር ለማጋራት ከታች ያለውን አዝራር ይጠቀሙ።"
     },
     'en': {
         'welcome': (
@@ -227,7 +230,10 @@ TEXTS = {
         'order_label': "🧾 Order No.",
         'order_confirmed': "✅ **Your order is confirmed!**\n\n🧾 Order #{order_id}\nYour payment is verified. Our expert has started working; we will be in touch shortly. 🚀",
         'order_rejected': "❌ **We could not verify your payment**\n\n🧾 Order #{order_id}\nPlease send a valid receipt or contact us via [Direct Inbox](https://t.me/Respect_for_God).",
-        'no_reviews': "_No published reviews yet._\n\n"
+        'no_reviews': "_No published reviews yet._\n\n",
+        'review_pending': "\n\n🔎 _Your review will be published after admin verification._",
+        'rate_label': "Rating",
+        'contact_not_own': "⚠️ Please use the button below to share your own phone number."
     }
 }
 
@@ -288,6 +294,24 @@ def get_or_create_pending_order(user_id, preferred_id=None, service_name=None):
     conn.close()
     return row[0], row[1]
 
+async def notify_admin(context, text, markup=None):
+    """Plain-text message to the admin. Returns True if delivered."""
+    try:
+        await context.bot.send_message(chat_id=ADMIN_USER_ID, text=text, reply_markup=markup)
+        return True
+    except TelegramError as e:
+        logger.error("Could not notify admin (has the admin pressed /start in the bot?): %s", e)
+        return False
+
+def review_prompt_markup(t):
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton(f"{n}⭐", callback_data=f"rate_{n}") for n in range(1, 6)],
+        [InlineKeyboardButton(t['back_menu'], callback_data="main_menu")],
+    ])
+
+def review_prompt_text(t, rating):
+    return f"{t['review_prompt']}\n\n⭐ {t['rate_label']}: {rating}/5"
+
 def build_main_keyboard(t):
     return InlineKeyboardMarkup([
         [InlineKeyboardButton(t['btn_design'], callback_data="serv_design")],
@@ -347,22 +371,32 @@ async def stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
     cursor = conn.cursor()
     cursor.execute("SELECT COUNT(*) FROM users")
     total_users = cursor.fetchone()[0]
-    cursor.execute("SELECT COUNT(*) FROM users WHERE phone_number IS NOT NULL AND phone_number != 'SKIPPED'")
+    cursor.execute("SELECT COUNT(*) FROM users WHERE phone_number IS NOT NULL AND phone_number NOT IN ('', 'SKIPPED')")
     phone_leads = cursor.fetchone()[0]
+    cursor.execute("SELECT COUNT(*) FROM users WHERE phone_number = 'SKIPPED'")
+    skipped = cursor.fetchone()[0]
+    cursor.execute("SELECT COUNT(*) FROM users WHERE phone_number IS NULL OR phone_number = ''")
+    no_answer = cursor.fetchone()[0]
     cursor.execute("SELECT COUNT(*) FROM reviews")
     total_reviews = cursor.fetchone()[0]
+    cursor.execute("SELECT COUNT(*) FROM reviews WHERE approved = 0")
+    pending_reviews = cursor.fetchone()[0]
     cursor.execute("SELECT COUNT(*) FROM orders")
     total_orders = cursor.fetchone()[0]
+    cursor.execute("SELECT COUNT(*) FROM orders WHERE status = 'pending'")
+    pending_orders = cursor.fetchone()[0]
     conn.close()
 
     stats_msg = (
-        "📊 **RM Media Private Admin Analytics**\n\n"
-        f"👥 **አጠቃላይ የቦት ተጠቃሚዎች:** {total_users}\n"
-        f"📱 **የተመዘገቡ ስልክ ቁጥሮች (Leads):** {phone_leads}\n"
-        f"🛒 **የተደረጉ አጠቃላይ ትዕዛዞች:** {total_orders}\n"
-        f"⭐ **የተጻፉ ሪቪውዎች:** {total_reviews}\n"
+        "📊 RM Media Private Admin Analytics\n\n"
+        f"👥 አጠቃላይ የቦት ተጠቃሚዎች: {total_users}\n"
+        f"📱 ስልክ ያጋሩ (Verified Leads): {phone_leads}\n"
+        f"⏭ ስልክ Skip ያደረጉ (Skipped): {skipped}\n"
+        f"❔ ገና ያልመለሱ (No answer yet): {no_answer}\n\n"
+        f"🛒 የተደረጉ አጠቃላይ ትዕዛዞች: {total_orders} (⏳ በመጠባበቅ ላይ: {pending_orders})\n"
+        f"⭐ የተጻፉ ሪቪውዎች: {total_reviews} (⏳ ማረጋገጫ የሚጠብቁ: {pending_reviews})"
     )
-    await update.message.reply_text(stats_msg, parse_mode="Markdown")
+    await update.message.reply_text(stats_msg)
 
 # 📢 ADMIN BROADCAST COMMAND (/broadcast መልእክት)
 async def broadcast(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -449,8 +483,20 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     elif data == "leave_review":
         context.user_data["waiting_for_review"] = True
-        markup = InlineKeyboardMarkup([[InlineKeyboardButton(t['back_menu'], callback_data="main_menu")]])
-        await query.edit_message_text(t['review_prompt'], reply_markup=markup, parse_mode="Markdown")
+        context.user_data["review_rating"] = 5
+        await query.edit_message_text(review_prompt_text(t, 5), reply_markup=review_prompt_markup(t), parse_mode="Markdown")
+
+    elif data.startswith("rate_"):
+        try:
+            rating = max(1, min(int(data.split("_")[1]), 5))
+        except ValueError:
+            rating = 5
+        context.user_data["waiting_for_review"] = True
+        context.user_data["review_rating"] = rating
+        try:
+            await query.edit_message_text(review_prompt_text(t, rating), reply_markup=review_prompt_markup(t), parse_mode="Markdown")
+        except TelegramError:
+            pass  # same rating pressed twice -> "message is not modified"
 
     elif data == "settings":
         markup = InlineKeyboardMarkup([
@@ -539,30 +585,91 @@ async def admin_order_callback(update: Update, context: ContextTypes.DEFAULT_TYP
         pass
     await query.message.reply_text(f"Order #{order_id} -> {new_status.upper()} ({delivered}).")
 
+# 🔒 ADMIN: ✅ Approve / ❌ Reject buttons under each pending review
+async def review_moderation_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    if query.from_user.id != ADMIN_USER_ID:
+        await query.answer("⛔ Not allowed", show_alert=True)
+        return
+
+    try:
+        _, action, review_id = query.data.split("_")
+        review_id = int(review_id)
+    except ValueError:
+        await query.answer("Invalid data", show_alert=True)
+        return
+
+    approve = action == "ok"
+    conn = sqlite3.connect(DB_FILE)
+    cursor = conn.cursor()
+    if approve:
+        cursor.execute("UPDATE reviews SET approved = 1 WHERE id = ? AND approved = 0", (review_id,))
+    else:
+        cursor.execute("DELETE FROM reviews WHERE id = ? AND approved = 0", (review_id,))
+    changed = cursor.rowcount
+    conn.commit()
+    conn.close()
+
+    try:
+        await query.edit_message_reply_markup(reply_markup=None)
+    except TelegramError:
+        pass
+
+    if not changed:
+        await query.answer(f"Review #{review_id} was already handled", show_alert=True)
+        return
+
+    await query.answer("Done")
+    result = "APPROVED -> now public" if approve else "REJECTED -> deleted"
+    await query.message.reply_text(f"Review #{review_id} {result}.")
+
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
     lang = get_user_lang(user.id)
     t = TEXTS.get(lang, TEXTS['am'])
 
     if update.message.contact:
-        phone = update.message.contact.phone_number
+        contact = update.message.contact
+        if contact.user_id and contact.user_id != user.id:
+            await update.message.reply_text(t['contact_not_own'])
+            return
+        phone = contact.phone_number
         conn = sqlite3.connect(DB_FILE)
         cursor = conn.cursor()
+        cursor.execute("INSERT OR IGNORE INTO users (user_id, full_name) VALUES (?, ?)", (user.id, user.full_name))
+        cursor.execute("SELECT phone_number FROM users WHERE user_id = ?", (user.id,))
+        prev = cursor.fetchone()
+        first_time = not (prev and prev[0])
         cursor.execute("UPDATE users SET phone_number = ? WHERE user_id = ?", (phone, user.id))
         conn.commit()
         conn.close()
-        
+
         await update.message.reply_text("✅ እናመሰግናለን! ስልክ ቁጥርዎ ተመዝግቧል።", reply_markup=ReplyKeyboardRemove())
+        if first_time:
+            await notify_admin(context, (
+                f"👤 አዲስ ተጠቃሚ ተመዝግቧል: {user.full_name} | ስልክ: {phone}\n"
+                f"🔗 {'@' + user.username if user.username else '-'} | 🪪 ID: {user.id}"
+            ))
         await start(update, context)
         return
 
     if update.message.text in ["ዝለል / Skip ➡️", "Skip ➡️"]:
         conn = sqlite3.connect(DB_FILE)
         cursor = conn.cursor()
-        cursor.execute("UPDATE users SET phone_number = 'SKIPPED' WHERE user_id = ?", (user.id,))
+        cursor.execute("INSERT OR IGNORE INTO users (user_id, full_name) VALUES (?, ?)", (user.id, user.full_name))
+        cursor.execute("SELECT phone_number FROM users WHERE user_id = ?", (user.id,))
+        prev = cursor.fetchone()
+        first_time = not (prev and prev[0])
+        if first_time:  # never overwrite an already shared phone number
+            cursor.execute("UPDATE users SET phone_number = 'SKIPPED' WHERE user_id = ?", (user.id,))
         conn.commit()
         conn.close()
         await update.message.reply_text("እንቀጥል...", reply_markup=ReplyKeyboardRemove())
+        if first_time:
+            await notify_admin(context, (
+                f"👤 አዲስ ተጠቃሚ ተመዝግቧል: {user.full_name} | ስልክ: Skip\n"
+                f"🔗 {'@' + user.username if user.username else '-'} | 🪪 ID: {user.id}"
+            ))
         await start(update, context)
         return
 
@@ -622,17 +729,40 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await update.message.reply_text(t['review_error'])
             return
 
+        try:
+            rating = max(1, min(int(context.user_data.get("review_rating", 5)), 5))
+        except (TypeError, ValueError):
+            rating = 5
+
         conn = sqlite3.connect(DB_FILE)
         cursor = conn.cursor()
         cursor.execute(
             "INSERT INTO reviews (user_id, full_name, rating, review_text, approved) VALUES (?, ?, ?, ?, ?)",
-            (user.id, user.full_name, 5, review_text.strip(), 1),
+            (user.id, user.full_name, rating, review_text.strip(), 0),
         )
+        review_id = cursor.lastrowid
         conn.commit()
         conn.close()
 
         context.user_data["waiting_for_review"] = False
-        await update.message.reply_text(t['review_success'], parse_mode="Markdown")
+        context.user_data.pop("review_rating", None)
+
+        admin_text = (
+            "⭐ NEW REVIEW (pending approval)\n\n"
+            f"🆔 Review: #{review_id}\n"
+            f"👤 Name: {user.full_name}\n"
+            f"🔗 Username: {'@' + user.username if user.username else '-'}\n"
+            f"🪪 User ID: {user.id}\n"
+            f"⭐ Rating: {'⭐' * rating} ({rating}/5)\n\n"
+            f"💬 {review_text.strip()[:3000]}"
+        )
+        admin_markup = InlineKeyboardMarkup([[
+            InlineKeyboardButton("✅ ሪቪውን አረጋግጥ (Approve)", callback_data=f"rev_ok_{review_id}"),
+            InlineKeyboardButton("❌ ውድቅ አድርግ (Reject)", callback_data=f"rev_no_{review_id}"),
+        ]])
+        await notify_admin(context, admin_text, admin_markup)
+
+        await update.message.reply_text(t['review_success'] + t['review_pending'], parse_mode="Markdown")
         await start(update, context)
 
 def main():
@@ -644,6 +774,7 @@ def main():
     app.add_handler(CommandHandler("stats", stats))
     app.add_handler(CommandHandler("broadcast", broadcast))
     app.add_handler(CallbackQueryHandler(admin_order_callback, pattern=r"^adm_(ok|no)_\d+$"))
+    app.add_handler(CallbackQueryHandler(review_moderation_callback, pattern=r"^rev_(ok|no)_\d+$"))
     app.add_handler(CallbackQueryHandler(button_handler))
     app.add_handler(MessageHandler(filters.ALL, handle_message))
 

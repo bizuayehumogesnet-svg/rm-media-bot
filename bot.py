@@ -1,18 +1,65 @@
-import os
+"""
+RM Media | Result & Momentum - Telegram bot  (PHASE 1: secure core)
+
+Scope of Phase 1: /start, /help, /terms, /deletemydata, basic menus, service & package
+prices, language switch.  No orders / receipts / reviews / broadcast yet (Phase 2).
+
+Safety design
+  * Rate limiting   : per-user cooldown + sliding window + temporary mute, and a global
+                      pacer (max updates/second).  Optional PTB AIORateLimiter on top
+                      (needs:  pip install "python-telegram-bot[rate-limiter]").
+  * Error handling  : every handler is wrapped (guarded) + one global error handler.
+                      Flood-wait (RetryAfter), Conflict, network errors, "message is not
+                      modified" and parse errors are handled without crashing.
+  * Sanitization    : everything dynamic goes through html.escape; parse_mode is HTML only;
+                      if Telegram still rejects an entity, the message is re-sent as plain text.
+  * Secrets         : only os.getenv(); nothing sensitive is written in this file or logged.
+  * Startup safety  : drop_pending_updates (no backlog flood after downtime) and a crash
+                      back-off (no rapid restart loop against the Telegram API).
+  * Copy            : no fake client counters, no fake scarcity.  A crossed-out price is shown
+                      ONLY where you set a real regular list price ("old") in PACKAGES.
+
+Required env vars (Render -> Environment):
+  BOT_TOKEN, ADMIN_USER_ID   (comma separated if more than one admin)
+Optional:
+  CONTACT_USERNAME (without @), PORTFOLIO_URL (https://...), SUPPORT_PHONE,
+  CBE_ACCOUNT, CBE_NAME, TELEBIRR_NUMBER, TELEBIRR_NAME   (payment screen appears only if all 4 set)
+  TERMS_DELIVERY, TERMS_REVISIONS, TERMS_REFUND            (one line each, shown in /terms)
+  DB_FILE, PORT, RENDER_EXTERNAL_URL (self-ping, every 10 min)
+
+requirements.txt:
+  python-telegram-bot[rate-limiter]>=20.7
+  flask
+"""
+
+import asyncio
+import html
 import logging
+import os
+import re
 import sqlite3
-from datetime import datetime
-from flask import Flask
+import sys
+import time
+import urllib.request
+from collections import deque
+from contextlib import closing
+from functools import wraps
 from threading import Thread
-from telegram import (
-    InlineKeyboardButton,
-    InlineKeyboardMarkup,
-    KeyboardButton,
-    ReplyKeyboardMarkup,
-    ReplyKeyboardRemove,
-    Update,
+
+from flask import Flask
+from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
+from telegram.error import (
+    BadRequest,
+    Conflict,
+    Forbidden,
+    InvalidToken,
+    NetworkError,
+    RetryAfter,
+    TelegramError,
+    TimedOut,
 )
 from telegram.ext import (
+    AIORateLimiter,
     ApplicationBuilder,
     CallbackQueryHandler,
     CommandHandler,
@@ -20,766 +67,915 @@ from telegram.ext import (
     MessageHandler,
     filters,
 )
-from telegram.error import TelegramError
 
-# Render Keep-Alive Server
-app = Flask('')
+# ---------------------------------------------------------------------------
+# Logging (token can leak through httpx request logs -> silence them)
+# ---------------------------------------------------------------------------
 
-@app.route('/')
-def home():
-    return "RM Media 10x Fully Automated & Secure Bot is Live!"
 
-def run():
-    port = int(os.environ.get("PORT", 10000))
-    app.run(host='0.0.0.0', port=port)
+class RedactingFormatter(logging.Formatter):
+    """Masks anything that looks like a bot token in EVERY log line, including tracebacks."""
 
-def keep_alive():
-    t = Thread(target=run)
-    t.start()
+    _TOKEN = re.compile(r"\d{6,}:[A-Za-z0-9_-]{30,}")
 
-logging.basicConfig(
-    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
-    level=logging.INFO,
-)
-logger = logging.getLogger(__name__)
+    def format(self, record):
+        text = super().format(record)
+        token = os.getenv("BOT_TOKEN", "").strip()
+        if token:
+            text = text.replace(token, "<token>")
+        return self._TOKEN.sub("<token>", text)
 
-DB_FILE = "rm_media_advanced.db"
 
-# 🔒 SECURITY SETTING: የነጠላ ባለቤት (Admin) የቴሌግራም ID
-ADMIN_USER_ID = int(os.getenv("ADMIN_USER_ID", "2133585693"))
+_handler = logging.StreamHandler()
+_handler.setFormatter(RedactingFormatter("%(asctime)s | %(levelname)s | %(name)s | %(message)s"))
+logging.basicConfig(level=logging.INFO, handlers=[_handler], force=True)
+for _noisy in ("httpx", "httpcore", "telegram.ext.Application", "apscheduler"):
+    logging.getLogger(_noisy).setLevel(logging.WARNING)
+logger = logging.getLogger("rm_media_bot")
 
+
+# ---------------------------------------------------------------------------
+# Configuration - ONLY from environment variables
+# ---------------------------------------------------------------------------
+def env(name, default=""):
+    return (os.getenv(name) or default).strip()
+
+
+def parse_admin_ids(raw):
+    ids = []
+    for part in re.split(r"[,\s]+", raw or ""):
+        if part.isdigit():
+            ids.append(int(part))
+    return ids
+
+
+def safe_https_url(raw):
+    raw = (raw or "").strip()
+    return raw if re.fullmatch(r"https://[^\s<>\"']{4,300}", raw) else ""
+
+
+BOT_TOKEN = env("BOT_TOKEN")
+ADMIN_IDS = parse_admin_ids(env("ADMIN_USER_ID") or env("ADMIN_USER_IDS"))
+DB_FILE = env("DB_FILE", "rm_media_advanced.db")
+PORT = int(env("PORT", "8080") or 8080)
+
+_contact = env("CONTACT_USERNAME").lstrip("@")
+CONTACT_USERNAME = _contact if re.fullmatch(r"[A-Za-z0-9_]{4,32}", _contact) else ""
+PORTFOLIO_URL = safe_https_url(env("PORTFOLIO_URL"))
+SUPPORT_PHONE = re.sub(r"[^\d+ ]", "", env("SUPPORT_PHONE"))[:20]
+
+CBE_ACCOUNT = env("CBE_ACCOUNT")
+CBE_NAME = env("CBE_NAME")
+TELEBIRR_NUMBER = env("TELEBIRR_NUMBER")
+TELEBIRR_NAME = env("TELEBIRR_NAME")
+PAYMENT_CONFIGURED = all([CBE_ACCOUNT, CBE_NAME, TELEBIRR_NUMBER, TELEBIRR_NAME])
+
+TERMS_DELIVERY = env("TERMS_DELIVERY")[:300]
+TERMS_REVISIONS = env("TERMS_REVISIONS")[:300]
+TERMS_REFUND = env("TERMS_REFUND")[:300]
+SELF_PING_URL = safe_https_url(env("RENDER_EXTERNAL_URL"))
+
+BOT_TOKEN_RE = re.compile(r"\d{6,}:[A-Za-z0-9_-]{30,}")
+
+
+# ---------------------------------------------------------------------------
+# Sanitization helpers
+# ---------------------------------------------------------------------------
+_CONTROL_RE = re.compile(r"[\x00-\x08\x0b-\x1f\x7f\u202a-\u202e\u2066-\u2069\u200e\u200f]")
+_TAG_RE = re.compile(r"<[^>]+>")
+
+
+def h(value):
+    """HTML-escape any dynamic value (names, prices, env values...)."""
+    return html.escape(str(value), quote=False)
+
+
+def clean_name(name):
+    name = _CONTROL_RE.sub("", name or "").strip()
+    return (name or "Customer")[:64]
+
+
+def strip_tags(text):
+    return html.unescape(_TAG_RE.sub("", text))
+
+
+def redact(text):
+    """Never let the bot token appear in logs / admin alerts."""
+    text = str(text)
+    if BOT_TOKEN:
+        text = text.replace(BOT_TOKEN, "<token>")
+    return BOT_TOKEN_RE.sub("<token>", text)
+
+
+def etb(n):
+    return f"{int(n):,} ETB"
+
+
+# ---------------------------------------------------------------------------
+# Database (same schema as the full bot -> compatible with the existing DB)
+# ---------------------------------------------------------------------------
 def init_db():
-    conn = sqlite3.connect(DB_FILE)
-    cursor = conn.cursor()
-    cursor.execute("""
-        CREATE TABLE IF NOT EXISTS users (
-            user_id INTEGER PRIMARY KEY,
-            full_name TEXT,
-            phone_number TEXT,
-            language TEXT DEFAULT 'am',
-            joined_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-        )
-    """)
-    cursor.execute("""
-        CREATE TABLE IF NOT EXISTS reviews (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            user_id INTEGER,
-            full_name TEXT,
-            rating INTEGER,
-            review_text TEXT,
-            approved INTEGER DEFAULT 1
-        )
-    """)
-    cursor.execute("""
-        CREATE TABLE IF NOT EXISTS orders (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            user_id INTEGER,
-            service_name TEXT,
-            status TEXT DEFAULT 'pending',
-            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-        )
-    """)
-    
-    cursor.execute("PRAGMA table_info(users)")
-    columns = [column[1] for column in cursor.fetchall()]
-    if 'phone_number' not in columns:
-        cursor.execute("ALTER TABLE users ADD COLUMN phone_number TEXT")
-        
-    conn.commit()
-    conn.close()
-
-init_db()
-
-TEXTS = {
-    'am': {
-        'welcome': (
-            "🔥 **የንግድዎን ሽያጭ እና እይታ በጥራት ያሳድጉ!** 🔥\n\n"
-            "እንኳን ወደ **RM Media | Result & Momentum** በደህና መጡ። 🚀\n\n"
-            "⭐ *ከ 120+ በላይ እርካታ ያገኙ ደንበኞች የመረጡን የብራንዲንግ እና የቪዲዮ ፕሮዳክሽን ማዕከል!*\n\n"
-            "📞 **የቀጥታ መስመር:** +251967830825\n"
-            "💬 **የባለሙያ ምክክር:** [ከዋና አዘጋጁ ጋር ይወያዩ](https://t.me/Respect_for_God)\n"
-            "🎨 **ፖርትፎሊዮ:** [የሰራናቸውን ስራዎች ይመልከቱ](https://t.me/Real_Works_Ethiopia)\n\n"
-            "👇 *እባክዎን ከታች ከሚገኙት አማራጮች የሚፈልጉትን ይምረጡ:*"
-        ),
-        'phone_prompt': "👋 ሰላም {name}! አገልግሎታችንን ለመጀመር እባክዎን ከታች ያለውን አዝራር በመጫን ስልክ ቁጥርዎን ያጋሩት፡",
-        'phone_btn': "📲 ስልክ ቁጥሬን አጋራ (Share Contact)",
-        'skip_phone': "ዝለል / Skip ➡️",
-        'btn_design': "🖼 የ1 ሰዓት ፈጣን ዲዛይን (ከ 1,500 ብር)",
-        'btn_video': "🎬 የቪዲዮ ፕሮዳክሽን (ከ 4,500 ብር)",
-        'btn_social': "📱 የሶሻል ሚዲያ ግብይት (SMM)",
-        'btn_portfolio': "🎨 ኦፊሴላዊ የፖርትፎሊዮ ማህደር",
-        'btn_reviews': "⭐ የተረጋገጡ የደንበኞች ግምገማዎች",
-        'btn_leave_review': "✍️ አስተያየት መስጠት",
-        'btn_settings': "⚙️ ቋንቋ / Settings",
-        'back_menu': "🔙 ወደ ዋናው ማውጫ",
-        'order_now': "🚀 አሁኑኑ ያዝዙ (In-Bot Order)",
-        'design_desc': (
-            "🖼 **የ1 ሰዓት ፈጣን ዲዛይን እና የታምብሌን ፓኬጅ**\n\n"
-            "💰 **ዋጋ:** 1,500 - 3,500 ብር\n\n"
-            "• የዩቲዩብ እና ቲክቶክ እይታን የሚጨምሩ ታምብሌኖች\n"
-            "• የሽያጭ መጠንን የሚጨምሩ የፌስቡክ/ቴሌግራም ፖስተሮች\n\n"
-            "⚠️ *የቦታ እጥረት ስላለ አሁኑኑ በማዘዝ ስራዎን ያስጀምሩ!*"
-        ),
-        'video_desc': (
-            "🎬 **የቪዲዮ ፕሮዳክሽን እና ሲነማቲክ ኤዲት ፓኬጅ**\n\n"
-            "💰 **ዋጋ:** 4,500 - 10,000 ብር\n\n"
-            "• ተመልካቹን የሚማርክ የምረቃ እና የልደት ቪዲዮ ኤዲቲንግ\n"
-            "• የንግድ ድርጅትዎን ሽያጭ የሚያነቃቁ የማስታወቂያ ቪዲዮዎች\n\n"
-            "⚡ *አሁኑኑ በማዘዝ ከባለሙያችን ጋር ይገናኙ:*"
-        ),
-        'social_desc': (
-            "📱 **የሶሻል ሚዲያ ግብይት እና አስተዳደር (SMM)**\n\n"
-            "💰 **ዋጋ:** 8,000 - 15,000 ብር / በወር\n\n"
-            "• ሙሉ የገጽ አስተዳደር እና የይዘት ስትራቴጂ\n"
-            "• ታዳሚዎን ወደ ቋሚ ደንበኛ የሚቀይር አሰራር\n\n"
-            "⚡ *አሁኑኑ በማዘዝ ስትራቴጂክ ውይይት ይጀምሩ:*"
-        ),
-        'checkout_text': (
-            "💳 **የትዕዛዝ እና የክፍያ ማረጋገጫ (Checkout)**\n\n"
-            "ትዕዛዝዎን ለማረጋገጥ እባክዎን በታች ያሉት የክፍያ አማራጮች ይጠቀሙ፡\n\n"
-            "🔹 **CBE (ኢትዮጵያ ንግድ ባንክ):** `1000570870487`\n"
-            "👤 **Account Name:** BIZUAYEHU MOGES MEKONNEN\n\n"
-            "🔹 **Telebirr:** `0967830825`\n"
-            "👤 **Name:** MOGES MEKONNEN\n\n"
-            "📸 **ክፍያ ከፈጸሙ በኋላ ቀጣይ ስቴፕ:**\n"
-            "1️⃣ የደረሰኝ ፎቶ (Receipt Image) ወይም የትራንስፎርሜሽን ቁጥር **እዚሁ ቦት ላይ ይላኩ**፤ ወይም\n"
-            "2️⃣ የትዕዛዝ ማረጋገጫዎን ለማፋጠን [ወዲያውኑ ስክሪንሾቱን እዚህ ይላኩልን (Direct Inbox)](https://t.me/Respect_for_God) 👈"
-        ),
-        'receipt_received': "✅ **የክፍያ ደረሰኝዎ ደርሶናል!**\n\nአመሰግናለን! በቅርብ ደቂቃዎች ውስጥ ክፍያዎ ተረጋግጦ ስራችንን እንጀምራለን። 🚀",
-        'review_prompt': "✍️ **እባክዎን ስለ አገልግሎታችን ያለዎትን እውነተኛ አስተያየት (ቢያንስ 5 ፊደላት) ይጻፉልን:**",
-        'review_error': "⚠️ **ማሳሰቢያ:** የጻፉት አስተያየት አጭር ነው። እባክዎን ትርጉም ያለው አስተያየት በድጋሚ ይጻፉ:",
-        'review_success': "🎉 **አስተያየትዎ በተሳካ ሁኔታ ተመዝግቧል! እናመሰግናለን።** 🚀",
-        'portfolio_desc': (
-            "🎨 **ኦፊሴላዊ የፖርትፎሊዮ ማህደር**\n\n"
-            "እስካሁን የሰራናቸውን ዲዛይኖች፣ ታምብሌኖች እና ቪዲዮዎች በቴሌግራም ቻናላችን ላይ ማየት ይችላሉ።\n\n"
-            "👇 *ከታች ያለውን አዝራር በመጫን ማህደራችንን ይጎብኙ:*"
-        ),
-        'receipt_invalid': "⚠️ እባክዎን የክፍያ ደረሰኝ ፎቶ (ስክሪንሾት) ወይም የትራንዛክሽን ቁጥር ይላኩ።",
-        'order_label': "🧾 የትዕዛዝ ቁጥር",
-        'order_confirmed': "✅ **ትዕዛዝዎ ተረጋግጧል!**\n\n🧾 ትዕዛዝ #{order_id}\nክፍያዎ ተረጋግጧል። ባለሙያችን ስራውን ጀምሯል፤ በቅርቡ እናገኝዎታለን። 🚀",
-        'order_rejected': "❌ **ክፍያዎን ማረጋገጥ አልቻልንም**\n\n🧾 ትዕዛዝ #{order_id}\nእባክዎን ትክክለኛ ደረሰኝ ይላኩ ወይም በ[Direct Inbox](https://t.me/Respect_for_God) ያነጋግሩን።",
-        'no_reviews': "_እስካሁን የታተመ ግምገማ የለም።_\n\n",
-        'review_pending': "\n\n🔎 _አስተያየትዎ በአድሚን ከተረጋገጠ በኋላ ይታተማል።_",
-        'rate_label': "ደረጃ",
-        'contact_not_own': "⚠️ እባክዎን የራስዎን ስልክ ቁጥር ለማጋራት ከታች ያለውን አዝራር ይጠቀሙ።"
-    },
-    'en': {
-        'welcome': (
-            "🔥 **Elevate Your Brand & Double Your Sales!** 🔥\n\n"
-            "Welcome to **RM Media | Result & Momentum**. 🚀\n\n"
-            "⭐ *Trusted by 120+ Verified Clients across Ethiopia!*\n\n"
-            "📞 **Direct Line:** +251967830825\n"
-            "💬 **Direct Consultation:** [Chat with Lead Expert](https://t.me/Respect_for_God)\n"
-            "🎨 **Portfolio:** [Explore Our Works](https://t.me/Real_Works_Ethiopia)\n\n"
-            "👇 *Choose a service below to transform your business:*"
-        ),
-        'phone_prompt': "👋 Hello {name}! To get started, please share your phone number using the button below:",
-        'phone_btn': "📲 Share Contact",
-        'skip_phone': "Skip ➡️",
-        'btn_design': "🖼 1-Hour Fast Design (From 1,500 ETB)",
-        'btn_video': "🎬 Video Production (From 4,500 ETB)",
-        'btn_social': "📱 Social Media Marketing (8,000 - 15,000 ETB)",
-        'btn_portfolio': "🎨 Official Portfolio Archive",
-        'btn_reviews': "⭐ Verified Client Testimonials",
-        'btn_leave_review': "✍️ Leave a Review",
-        'btn_settings': "⚙️ Language / Settings",
-        'back_menu': "🔙 Main Menu",
-        'order_now': "🚀 Order Now (In-Bot Order)",
-        'design_desc': (
-            "🖼 **1-Hour Fast Design & Thumbnails Package**\n\n"
-            "💰 **Price:** 1,500 - 3,500 ETB\n\n"
-            "• High CTR YouTube & TikTok Thumbnails\n"
-            "• High-Converting Social Media Posters\n\n"
-            "⚠️ *Limited slots available today. Initiate your order now!*"
-        ),
-        'video_desc': (
-            "🎬 **Video Production & Cinematic Edit Package**\n\n"
-            "💰 **Price:** 4,500 - 10,000 ETB\n\n"
-            "• Engaging Graduation & Birthday Video Editing\n"
-            "• Commercial Promo Videos to Boost Sales\n\n"
-            "⚡ *Order now to consult directly with our expert:*"
-        ),
-        'social_desc': (
-            "📱 **Social Media Marketing & SMM Retainer**\n\n"
-            "💰 **Price:** 8,000 - 15,000 ETB / Month\n\n"
-            "• Full Page Management & Content Strategy\n"
-            "• Systems designed to convert audience into loyal clients\n\n"
-            "⚡ *Order now to start your strategy session:*"
-        ),
-        'checkout_text': (
-            "💳 **In-Bot Order & Payment Confirmation**\n\n"
-            "To confirm your order, please process payment to:\n\n"
-            "🔹 **CBE Bank:** `1000570870487`\n"
-            "👤 **Account Name:** BIZUAYEHU MOGES MEKONNEN\n\n"
-            "🔹 **Telebirr:** `0967830825`\n"
-            "👤 **Name:** MOGES MEKONNEN\n\n"
-            "📸 **Next Step After Payment:**\n"
-            "1️⃣ Upload your Receipt Screenshot right here in this bot; or\n"
-            "2️⃣ Send screenshot directly to our expert: [Send Screenshot to Direct Inbox](https://t.me/Respect_for_God) 👈"
-        ),
-        'receipt_received': "✅ **Receipt Received!**\n\nThank you! Our team will verify your payment and start your project shortly. 🚀",
-        'review_prompt': "✍️ **Please write your review (at least 5 characters) below:**",
-        'review_error': "⚠️ **Notice:** Your review is too short. Please write a meaningful review:",
-        'review_success': "🎉 **Your review has been successfully recorded! Thank you.** 🚀",
-        'portfolio_desc': (
-            "🎨 **Official Portfolio Archive**\n\n"
-            "Browse the designs, thumbnails and videos we have delivered on our Telegram channel.\n\n"
-            "👇 *Tap the button below to explore our archive:*"
-        ),
-        'receipt_invalid': "⚠️ Please send a payment receipt photo (screenshot) or the transaction reference number.",
-        'order_label': "🧾 Order No.",
-        'order_confirmed': "✅ **Your order is confirmed!**\n\n🧾 Order #{order_id}\nYour payment is verified. Our expert has started working; we will be in touch shortly. 🚀",
-        'order_rejected': "❌ **We could not verify your payment**\n\n🧾 Order #{order_id}\nPlease send a valid receipt or contact us via [Direct Inbox](https://t.me/Respect_for_God).",
-        'no_reviews': "_No published reviews yet._\n\n",
-        'review_pending': "\n\n🔎 _Your review will be published after admin verification._",
-        'rate_label': "Rating",
-        'contact_not_own': "⚠️ Please use the button below to share your own phone number."
-    }
-}
-
-def get_user_lang(user_id):
-    conn = sqlite3.connect(DB_FILE)
-    cursor = conn.cursor()
-    cursor.execute("SELECT language FROM users WHERE user_id = ?", (user_id,))
-    row = cursor.fetchone()
-    conn.close()
-    return row[0] if row else 'am'
-
-SERVICE_LABELS = {
-    'design': '🖼 Fast Design / Thumbnail',
-    'video': '🎬 Video Production',
-    'social': '📱 Social Media Marketing',
-}
-
-def md_escape(text):
-    """Escape characters that break Telegram legacy Markdown."""
-    text = str(text or "")
-    for ch in ("\\", "_", "*", "`", "["):
-        text = text.replace(ch, "\\" + ch)
-    return text
-
-def first_name_only(full_name):
-    parts = (full_name or "").strip().split()
-    return parts[0] if parts else "Customer"
-
-def get_or_create_pending_order(user_id, preferred_id=None, service_name=None):
-    """Return (order_id, service_name) of the user's pending order.
-    Reuses an existing pending order instead of creating duplicates."""
-    conn = sqlite3.connect(DB_FILE)
-    cursor = conn.cursor()
-    row = None
-    if preferred_id:
-        cursor.execute(
-            "SELECT id, service_name FROM orders WHERE id = ? AND user_id = ? AND status = 'pending'",
-            (preferred_id, user_id),
-        )
-        row = cursor.fetchone()
-    if not row and service_name:
-        cursor.execute(
-            "SELECT id, service_name FROM orders WHERE user_id = ? AND service_name = ? AND status = 'pending' ORDER BY id DESC LIMIT 1",
-            (user_id, service_name),
-        )
-        row = cursor.fetchone()
-    if not row and not service_name:
-        cursor.execute(
-            "SELECT id, service_name FROM orders WHERE user_id = ? AND status = 'pending' ORDER BY id DESC LIMIT 1",
-            (user_id,),
-        )
-        row = cursor.fetchone()
-    if not row:
-        name = service_name or "unspecified"
-        cursor.execute("INSERT INTO orders (user_id, service_name) VALUES (?, ?)", (user_id, name))
+    with closing(sqlite3.connect(DB_FILE, timeout=10)) as conn:
+        cur = conn.cursor()
+        cur.execute("""
+            CREATE TABLE IF NOT EXISTS users (
+                user_id INTEGER PRIMARY KEY,
+                full_name TEXT,
+                phone_number TEXT,
+                language TEXT DEFAULT 'am',
+                joined_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )
+        """)
+        cur.execute("""
+            CREATE TABLE IF NOT EXISTS reviews (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                user_id INTEGER,
+                full_name TEXT,
+                rating INTEGER,
+                review_text TEXT,
+                approved INTEGER DEFAULT 1
+            )
+        """)
+        cur.execute("""
+            CREATE TABLE IF NOT EXISTS orders (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                user_id INTEGER,
+                service_name TEXT,
+                status TEXT DEFAULT 'pending',
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )
+        """)
+        cur.execute("PRAGMA table_info(users)")
+        if "phone_number" not in [c[1] for c in cur.fetchall()]:
+            cur.execute("ALTER TABLE users ADD COLUMN phone_number TEXT")
         conn.commit()
-        row = (cursor.lastrowid, name)
-    conn.close()
-    return row[0], row[1]
 
-async def notify_admin(context, text, markup=None):
-    """Plain-text message to the admin. Returns True if delivered."""
+
+def db_register_user(user):
     try:
-        await context.bot.send_message(chat_id=ADMIN_USER_ID, text=text, reply_markup=markup)
+        with closing(sqlite3.connect(DB_FILE, timeout=10)) as conn:
+            conn.execute(
+                "INSERT OR IGNORE INTO users (user_id, full_name) VALUES (?, ?)",
+                (user.id, clean_name(user.full_name)),
+            )
+            conn.commit()
+    except sqlite3.Error as e:
+        logger.error("DB register failed: %s", e)
+
+
+def db_get_lang(user_id):
+    try:
+        with closing(sqlite3.connect(DB_FILE, timeout=10)) as conn:
+            row = conn.execute("SELECT language FROM users WHERE user_id = ?", (user_id,)).fetchone()
+        return row[0] if row and row[0] in ("am", "en") else "am"
+    except sqlite3.Error as e:
+        logger.error("DB lang read failed: %s", e)
+        return "am"
+
+
+def db_set_lang(user, lang):
+    if lang not in ("am", "en"):
+        return
+    try:
+        with closing(sqlite3.connect(DB_FILE, timeout=10)) as conn:
+            conn.execute("INSERT OR IGNORE INTO users (user_id, full_name) VALUES (?, ?)", (user.id, clean_name(user.full_name)))
+            conn.execute("UPDATE users SET language = ? WHERE user_id = ?", (lang, user.id))
+            conn.commit()
+    except sqlite3.Error as e:
+        logger.error("DB lang write failed: %s", e)
+
+
+def db_delete_user(user_id):
+    try:
+        with closing(sqlite3.connect(DB_FILE, timeout=10)) as conn:
+            conn.execute("DELETE FROM users WHERE user_id = ?", (user_id,))
+            conn.commit()
         return True
-    except TelegramError as e:
-        logger.error("Could not notify admin (has the admin pressed /start in the bot?): %s", e)
+    except sqlite3.Error as e:
+        logger.error("DB delete failed: %s", e)
         return False
 
-def review_prompt_markup(t):
-    return InlineKeyboardMarkup([
-        [InlineKeyboardButton(f"{n}⭐", callback_data=f"rate_{n}") for n in range(1, 6)],
-        [InlineKeyboardButton(t['back_menu'], callback_data="main_menu")],
-    ])
 
-def review_prompt_text(t, rating):
-    return f"{t['review_prompt']}\n\n⭐ {t['rate_label']}: {rating}/5"
+def db_stats():
+    with closing(sqlite3.connect(DB_FILE, timeout=10)) as conn:
+        total = conn.execute("SELECT COUNT(*) FROM users").fetchone()[0]
+        am = conn.execute("SELECT COUNT(*) FROM users WHERE language = 'am' OR language IS NULL").fetchone()[0]
+        en = conn.execute("SELECT COUNT(*) FROM users WHERE language = 'en'").fetchone()[0]
+    return total, am, en
 
-def build_main_keyboard(t):
-    return InlineKeyboardMarkup([
-        [InlineKeyboardButton(t['btn_design'], callback_data="serv_design")],
-        [InlineKeyboardButton(t['btn_video'], callback_data="serv_video")],
-        [InlineKeyboardButton(t['btn_social'], callback_data="serv_social")],
-        [InlineKeyboardButton(t['btn_portfolio'], callback_data="serv_portfolio")],
-        [
-            InlineKeyboardButton(t['btn_reviews'], callback_data="show_reviews"),
-            InlineKeyboardButton(t['btn_leave_review'], callback_data="leave_review"),
+
+# ---------------------------------------------------------------------------
+# Rate limiting
+# ---------------------------------------------------------------------------
+class UserLimiter:
+    """Per-user: minimum gap between actions + sliding window + temporary mute."""
+
+    def __init__(self, min_interval=0.5, window=10.0, max_actions=12, mute_for=20.0, warn_every=20.0):
+        self.min_interval = min_interval
+        self.window = window
+        self.max_actions = max_actions
+        self.mute_for = mute_for
+        self.warn_every = warn_every
+        self._state = {}
+
+    def _get(self, uid, now):
+        st = self._state.get(uid)
+        if st is None:
+            if len(self._state) > 5000:
+                self._purge(now)
+            st = self._state[uid] = {"hits": deque(), "last": float("-inf"), "muted_until": 0.0, "last_warn": float("-inf")}
+        return st
+
+    def _purge(self, now):
+        for uid in [u for u, s in self._state.items() if now - max(s["last"], 0.0) > 600 and now > s["muted_until"]]:
+            self._state.pop(uid, None)
+
+    def check(self, uid, now=None):
+        """Return 'ok', 'slow' (too fast, drop) or 'muted' (temporarily blocked)."""
+        now = time.monotonic() if now is None else now
+        st = self._get(uid, now)
+        if now < st["muted_until"]:
+            return "muted"
+        hits = st["hits"]
+        while hits and now - hits[0] > self.window:
+            hits.popleft()
+        if now - st["last"] < self.min_interval:
+            return "slow"
+        if len(hits) >= self.max_actions:
+            st["muted_until"] = now + self.mute_for
+            hits.clear()
+            return "muted"
+        hits.append(now)
+        st["last"] = now
+        return "ok"
+
+    def should_warn(self, uid, now=None):
+        """True at most once per warn_every seconds (so warnings never become a flood)."""
+        now = time.monotonic() if now is None else now
+        st = self._get(uid, now)
+        if now - st["last_warn"] >= self.warn_every:
+            st["last_warn"] = now
+            return True
+        return False
+
+
+class GlobalPacer:
+    """Keeps the whole bot under a maximum number of handled updates per second."""
+
+    def __init__(self, per_second=15):
+        self.gap = 1.0 / per_second
+        self._next = 0.0
+        self._lock = None
+
+    async def wait(self):
+        if self._lock is None:
+            self._lock = asyncio.Lock()
+        async with self._lock:
+            now = time.monotonic()
+            delay = self._next - now
+            if delay > 0:
+                await asyncio.sleep(delay)
+                now = time.monotonic()
+            self._next = max(now, self._next) + self.gap
+
+
+LIMITER = UserLimiter()
+PACER = GlobalPacer(per_second=15)
+
+# ---------------------------------------------------------------------------
+# Safe sending helpers (parse-error fallback, flood-wait aware)
+# ---------------------------------------------------------------------------
+def _retry_seconds(exc):
+    ra = getattr(exc, "retry_after", 5)
+    try:
+        ra = ra.total_seconds() if hasattr(ra, "total_seconds") else float(ra)
+    except (TypeError, ValueError):
+        ra = 5.0
+    return min(max(ra, 1.0), 60.0)
+
+
+def _is_parse_error(exc):
+    m = str(exc).lower()
+    return "parse entities" in m or "can't parse" in m or "unsupported start tag" in m
+
+
+async def safe_edit(query, text, markup=None):
+    try:
+        await query.edit_message_text(text, reply_markup=markup, parse_mode="HTML")
+    except BadRequest as e:
+        m = str(e).lower()
+        if "not modified" in m:
+            return
+        if _is_parse_error(e):
+            logger.warning("HTML rejected by Telegram, resending as plain text: %s", redact(e))
+            await query.edit_message_text(strip_tags(text), reply_markup=markup)
+        elif "message to edit not found" in m or "can't be edited" in m:
+            await query.message.reply_text(text, reply_markup=markup, parse_mode="HTML")
+        else:
+            raise
+    except RetryAfter as e:
+        await asyncio.sleep(_retry_seconds(e))
+        await query.edit_message_text(text, reply_markup=markup, parse_mode="HTML")
+
+
+async def safe_reply(update, text, markup=None):
+    msg = update.effective_message
+    if msg is None:
+        return
+    try:
+        await msg.reply_text(text, reply_markup=markup, parse_mode="HTML")
+    except BadRequest as e:
+        if _is_parse_error(e):
+            logger.warning("HTML rejected by Telegram, resending as plain text: %s", redact(e))
+            await msg.reply_text(strip_tags(text), reply_markup=markup)
+        else:
+            raise
+    except RetryAfter as e:
+        await asyncio.sleep(_retry_seconds(e))
+        await msg.reply_text(text, reply_markup=markup, parse_mode="HTML")
+
+
+# ---------------------------------------------------------------------------
+# Global error handling
+# ---------------------------------------------------------------------------
+_last_admin_alert = float("-inf")
+_last_user_notice = {}
+
+
+async def handle_exception(update, context, exc):
+    """Single place that decides what to do with ANY exception. Never raises."""
+    global _last_admin_alert
+    try:
+        if isinstance(exc, RetryAfter):
+            wait = _retry_seconds(exc)
+            logger.warning("Telegram flood-wait: sleeping %.0fs", wait)
+            await asyncio.sleep(wait)
+            return
+        if isinstance(exc, Conflict):
+            logger.warning("Conflict: another instance is polling with this token (deploy overlap?).")
+            return
+        if isinstance(exc, (NetworkError, TimedOut)):
+            logger.warning("Network problem (will retry automatically): %s", redact(exc))
+            return
+        if isinstance(exc, Forbidden):
+            logger.info("User blocked the bot / no rights: %s", redact(exc))
+            return
+        if isinstance(exc, BadRequest) and "not modified" in str(exc).lower():
+            return
+
+        logger.error("Unhandled error: %s", redact(repr(exc)), exc_info=exc)
+
+        now = time.monotonic()
+        if ADMIN_IDS and context is not None and now - _last_admin_alert > 600:
+            _last_admin_alert = now
+            note = f"⚠️ Bot error: {type(exc).__name__}: {redact(str(exc))[:300]}"
+            for admin_id in ADMIN_IDS:
+                try:
+                    await context.bot.send_message(chat_id=admin_id, text=note)
+                except TelegramError:
+                    pass
+
+        if isinstance(update, Update) and update.effective_user and update.effective_chat:
+            uid = update.effective_user.id
+            if now - _last_user_notice.get(uid, -1e9) > 60:
+                _last_user_notice[uid] = now
+                try:
+                    await context.bot.send_message(
+                        chat_id=update.effective_chat.id,
+                        text="⚠️ ችግር ተፈጥሯል፤ እባክዎ ትንሽ ቆይተው ይሞክሩ። / Something went wrong, please try again shortly.",
+                    )
+                except TelegramError:
+                    pass
+    except Exception:  # the error handler itself must never crash
+        logger.exception("error handler failed")
+
+
+async def error_handler(update, context):
+    await handle_exception(update, context, context.error)
+
+
+def guarded(fn):
+    """Rate-limit + global pacing + try/except around every handler."""
+
+    @wraps(fn)
+    async def wrapper(update, context):
+        try:
+            user = update.effective_user
+            if user is None or user.is_bot:
+                return
+            if user.id not in ADMIN_IDS:
+                verdict = LIMITER.check(user.id)
+                if verdict != "ok":
+                    if LIMITER.should_warn(user.id):
+                        if update.callback_query:
+                            await update.callback_query.answer("⏳ እባክዎ ትንሽ ቀስ ይበሉ / Please slow down", show_alert=False)
+                        elif verdict == "muted" and update.effective_message:
+                            await update.effective_message.reply_text("⏳ እባክዎ ትንሽ ቆይተው ይሞክሩ / Please wait a few seconds.")
+                    return
+            await PACER.wait()
+            await fn(update, context)
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            await handle_exception(update, context, exc)
+
+    return wrapper
+
+
+# ---------------------------------------------------------------------------
+# Content: texts and packages  (HTML, bilingual)
+# ---------------------------------------------------------------------------
+# old = regular list price shown crossed out.  Set old=None unless it is a REAL list price.
+PACKAGES = {
+    "design": {
+        "emoji": "🖼",
+        "title": {"am": "ዲዛይን እና ታምብሌን", "en": "Design & Thumbnails"},
+        "tagline": {
+            "am": "• የዩቲዩብ እና ቲክቶክ ታምብሌኖች\n• የፌስቡክ/ቴሌግራም ፖስተሮች",
+            "en": "• YouTube & TikTok thumbnails\n• Facebook / Telegram posters",
+        },
+        "items": [
+            {"key": "flyer", "emoji": "🎯", "name": "Single Flyer (Starter)", "price": 990, "old": None,
+             "includes": {"am": "1 ፍላየር", "en": "1 flyer"}},
+            {"key": "growth", "emoji": "🔥", "name": "Growth Starter Pack", "price": 1990, "old": 4000,
+             "includes": {"am": "3 ፖስተሮች", "en": "3 posters"}},
+            {"key": "pro", "emoji": "💎", "name": "Pro Business Bundle", "price": 2990, "old": 6500,
+             "includes": {"am": "5 ፖስተሮች + 1 ሽፋን (Cover)", "en": "5 posters + 1 cover"}},
         ],
-        [InlineKeyboardButton(t['btn_settings'], callback_data="settings")],
-    ])
+    },
+    "video": {
+        "emoji": "🎬",
+        "title": {"am": "ቪዲዮ ፕሮዳክሽን", "en": "Video Production"},
+        "tagline": {
+            "am": "• የማስታወቂያ ቪዲዮዎች\n• የምረቃ እና የልደት ቪዲዮ ኤዲቲንግ",
+            "en": "• Promo videos\n• Graduation & birthday video editing",
+        },
+        "items": [
+            {"key": "reel", "emoji": "⚡", "name": "Promo Reel (30 sec)", "price": 2490, "old": 5000,
+             "includes": {"am": "የ30 ሰከንድ የማስታወቂያ ሪል", "en": "30-second promo reel"}},
+            {"key": "standard", "emoji": "🚀", "name": "Standard Video Edit", "price": 4490, "old": 8000,
+             "includes": {"am": "ስታንዳርድ የቪዲዮ ኤዲቲንግ", "en": "Standard video edit"}},
+        ],
+    },
+    "social": {
+        "emoji": "📱",
+        "title": {"am": "ሶሻል ሚዲያ ግብይት (SMM)", "en": "Social Media Marketing (SMM)"},
+        "tagline": {
+            "am": "• የገጽ አስተዳደር\n• የይዘት እቅድ",
+            "en": "• Page management\n• Content planning",
+        },
+        "items": [
+            {"key": "starter", "emoji": "⭐", "name": "SMM Starter Plan", "price": 4990, "old": 10000, "monthly": True,
+             "includes": {"am": "የሶሻል ሚዲያ ጀማሪ እቅድ (በወር)", "en": "Social media starter plan (monthly)"}},
+        ],
+    },
+}
 
-async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user = update.effective_user
-    conn = sqlite3.connect(DB_FILE)
-    cursor = conn.cursor()
-    cursor.execute(
-        "INSERT OR IGNORE INTO users (user_id, full_name) VALUES (?, ?)",
-        (user.id, user.full_name),
+T = {
+    "am": {
+        "welcome": ("👋 እንኳን ወደ <b>RM Media | Result &amp; Momentum</b> በደህና መጡ!\n\n"
+                    "ግራፊክ ዲዛይን፣ ቪዲዮ ኤዲቲንግ እና ሶሻል ሚዲያ ግብይት አገልግሎቶችን እናቀርባለን። "
+                    "ዋጋዎቻችን ከታች በግልጽ ተዘርዝረዋል።\n\n👇 ከታች ካሉት አማራጮች ይምረጡ፦"),
+        "m_portfolio": "🎨 ፖርትፎሊዮ", "m_contact": "💬 ያነጋግሩን", "m_howto": "🧭 እንዴት ማዘዝ ይቻላል?",
+        "m_pay": "💳 የክፍያ መረጃ", "m_terms": "📄 ደንቦች", "m_help": "❓ እገዛ", "m_lang": "🌐 ቋንቋ / Language",
+        "back": "🔙 ወደ ዋናው ማውጫ", "back_pkgs": "🔙 ወደ ፓኬጆች", "order_chat": "💬 በቀጥታ ለማዘዝ ያነጋግሩን",
+        "choose": "💎 ፓኬጅዎን ይምረጡ፦", "only": "ብቻ", "off": "ቅናሽ", "month": "/ በወር", "includes": "የሚያካትተው",
+        "price_note": "ℹ️ ዋጋዎች በኢትዮጵያ ብር (ETB) ናቸው። የተሰረዘው ዋጋ መደበኛ የዋጋ ዝርዝራችን ነው።",
+        "contact_us": "ለማዘዝ ወይም ለጥያቄ ያነጋግሩን",
+        "howto": ("🧭 <b>እንዴት ማዘዝ ይቻላል?</b>\n\n"
+                  "1️⃣ ከአገልግሎቶች ፓኬጅ ይምረጡ።\n"
+                  "2️⃣ በቀጥታ መልእክት ያነጋግሩን።\n"
+                  "3️⃣ የሥራውን ዝርዝር፣ የመጨረሻ ዋጋ እና የማስረከቢያ ጊዜ እናረጋግጣለን።\n"
+                  "4️⃣ በኦፊሴላዊው የክፍያ መረጃ ብቻ ይክፈሉ።\n"
+                  "5️⃣ ደረሰኙን በቀጥታ መልእክት ይላኩ፤ ክፍያውን አረጋግጠን ሥራ እንጀምራለን።"),
+        "pay_title": "💳 <b>የክፍያ መረጃ</b>",
+        "pay_warn": ("⚠️ ከመክፈልዎ በፊት የሥራው ዝርዝር እና የመጨረሻ ዋጋ ከእኛ ጋር መረጋገጡን፣ እንዲሁም የሒሳብ ስሙ ከታች ካለው ጋር መመሳሰሉን ያረጋግጡ። "
+                     "ደረሰኙን በቀጥታ መልእክት ይላኩ።"),
+        "lang_title": "🌐 ቋንቋ ይምረጡ / Choose your language", "lang_saved": "✅ ቋንቋ ተቀይሯል",
+        "help": ("❓ <b>እገዛ</b>\n\n"
+                 "/start — ዋና ማውጫ\n/help — ይህ መልእክት\n/terms — የአገልግሎት ደንቦች እና የግላዊነት መረጃ\n"
+                 "/deletemydata — በቦቱ ውስጥ የተቀመጠውን መረጃዎን መሰረዝ\n\n"
+                 "ለማዘዝ ወይም ለጥያቄ በ«ያነጋግሩን» ቁልፍ በቀጥታ ያግኙን።"),
+        "unknown": "ይቅርታ፣ ይህን መልእክት አልተረዳሁም። ከታች ያለውን ማውጫ ይጠቀሙ ወይም /help ይላኩ።",
+        "delete_ask": "🗑 በቦቱ ውስጥ የተቀመጠውን መረጃዎን (የቴሌግራም ID፣ ስም፣ ቋንቋ) እንሰርዝ?",
+        "delete_yes": "✅ አዎ፣ ሰርዝ", "delete_no": "❌ አይ", "delete_done": "✅ መረጃዎ ተሰርዟል።", "delete_cancel": "ተሰርዟል፤ ምንም አልተቀየረም።",
+        "delete_fail": "⚠️ አሁን መሰረዝ አልተቻለም፤ እባክዎ ቆይተው ይሞክሩ።",
+        "terms_title": "📄 <b>የአገልግሎት ደንቦች እና ግላዊነት</b>",
+        "terms_body": ("<b>1. አገልግሎት እና ዋጋ</b>\nዋጋዎች በቦቱ ውስጥ በኢትዮጵያ ብር (ETB) ይታያሉ። የተሰረዘ ዋጋ መደበኛ የዋጋ ዝርዝራችን ነው። "
+                       "የሥራው ዝርዝር እና የመጨረሻ ዋጋ ከክፍያ በፊት ከእርስዎ ጋር ይረጋገጣል።\n\n"
+                       "<b>2. ማዘዝ እና ክፍያ</b>\nትዕዛዞች በቀጥታ መልእክት ይቀበላሉ። ክፍያ በኦፊሴላዊው የክፍያ መረጃ ብቻ ይፈጸማል፤ ከመክፈልዎ በፊት የሒሳብ ስሙን ያረጋግጡ።\n\n"),
+        "terms_default": "<b>3. ማስረከቢያ፣ ማሻሻያ እና ገንዘብ ተመላሽ</b>\nየማስረከቢያ ጊዜ፣ የማሻሻያ ብዛት እና የገንዘብ ተመላሽ ሁኔታዎች ከክፍያ በፊት በጽሑፍ ከእርስዎ ጋር ይስማማሉ።",
+        "terms_custom": "<b>3. ማስረከቢያ፣ ማሻሻያ እና ገንዘብ ተመላሽ</b>",
+        "t_delivery": "ማስረከቢያ", "t_revisions": "ማሻሻያ", "t_refund": "ተመላሽ",
+        "terms_data": ("\n\n<b>4. የእርስዎ መረጃ</b>\nቦቱን ለማስኬድ የምናስቀምጠው የቴሌግራም ID፣ የሚታየው ስምዎ እና የቋንቋ ምርጫዎን ብቻ ነው። "
+                       "መረጃዎን አንሸጥም ወይም ለሌላ አናካፍልም። በ /deletemydata መሰረዝ ይችላሉ (ለሂሳብ አያያዝ የሚያስፈልጉ የትዕዛዝ መዝገቦች ሊቆዩ ይችላሉ)።\n\n"
+                       "<b>5. ቴሌግራም</b>\nየቦቱ አጠቃቀም የቴሌግራም የአገልግሎት ደንቦችንም ይከተላል።"),
+    },
+    "en": {
+        "welcome": ("👋 Welcome to <b>RM Media | Result &amp; Momentum</b>!\n\n"
+                    "We offer graphic design, video editing and social media marketing. "
+                    "Our prices are listed openly below.\n\n👇 Choose an option:"),
+        "m_portfolio": "🎨 Portfolio", "m_contact": "💬 Contact us", "m_howto": "🧭 How to order",
+        "m_pay": "💳 Payment info", "m_terms": "📄 Terms", "m_help": "❓ Help", "m_lang": "🌐 Language / ቋንቋ",
+        "back": "🔙 Main menu", "back_pkgs": "🔙 Back to packages", "order_chat": "💬 Order via direct chat",
+        "choose": "💎 Choose your package:", "only": "only", "off": "OFF", "month": "/ Month", "includes": "Includes",
+        "price_note": "ℹ️ Prices are in Ethiopian Birr (ETB). A crossed-out price is our regular list price.",
+        "contact_us": "Contact us to order or ask a question",
+        "howto": ("🧭 <b>How to order</b>\n\n"
+                  "1️⃣ Pick a package from Services.\n"
+                  "2️⃣ Message us directly.\n"
+                  "3️⃣ We confirm the scope, final price and delivery time with you.\n"
+                  "4️⃣ Pay using the official payment details only.\n"
+                  "5️⃣ Send the receipt in the chat; we verify it and start the work."),
+        "pay_title": "💳 <b>Payment info</b>",
+        "pay_warn": ("⚠️ Before paying, make sure the scope and final price are confirmed with us, and that the account name matches the one below. "
+                     "Send the receipt in our direct chat."),
+        "lang_title": "🌐 Choose your language / ቋንቋ ይምረጡ", "lang_saved": "✅ Language updated",
+        "help": ("❓ <b>Help</b>\n\n"
+                 "/start — main menu\n/help — this message\n/terms — service terms and privacy\n"
+                 "/deletemydata — delete the data this bot stores about you\n\n"
+                 "To order or ask a question, use the “Contact us” button."),
+        "unknown": "Sorry, I didn't understand that. Use the menu below or send /help.",
+        "delete_ask": "🗑 Delete the data this bot stores about you (Telegram ID, name, language)?",
+        "delete_yes": "✅ Yes, delete", "delete_no": "❌ No", "delete_done": "✅ Your data has been deleted.", "delete_cancel": "Cancelled, nothing changed.",
+        "delete_fail": "⚠️ Could not delete right now, please try again later.",
+        "terms_title": "📄 <b>Service terms &amp; privacy</b>",
+        "terms_body": ("<b>1. Services and prices</b>\nPrices are shown in the bot in Ethiopian Birr (ETB). A crossed-out price is our regular list price. "
+                       "The scope and final price are confirmed with you before you pay.\n\n"
+                       "<b>2. Ordering and payment</b>\nOrders are taken in the direct chat. Pay only to the official payment details and check the account name first.\n\n"),
+        "terms_default": "<b>3. Delivery, revisions and refunds</b>\nDelivery time, number of revisions and refund conditions are agreed with you in writing before payment.",
+        "terms_custom": "<b>3. Delivery, revisions and refunds</b>",
+        "t_delivery": "Delivery", "t_revisions": "Revisions", "t_refund": "Refunds",
+        "terms_data": ("\n\n<b>4. Your data</b>\nTo run the bot we store only your Telegram ID, display name and language choice. "
+                       "We do not sell or share it. You can delete it with /deletemydata (order records needed for bookkeeping may be kept).\n\n"
+                       "<b>5. Telegram</b>\nUse of this bot is also subject to Telegram's own terms."),
+    },
+}
+
+
+def L(lang):
+    return lang if lang in ("am", "en") else "am"
+
+
+def find_package(service, key):
+    svc = PACKAGES.get(service)
+    if not svc:
+        return None
+    for p in svc["items"]:
+        if p["key"] == key:
+            return svc, p
+    return None
+
+
+def discount_pct(p):
+    return int(round((p["old"] - p["price"]) * 100 / p["old"])) if p.get("old") else 0
+
+
+def price_line(p, t):
+    period = f" {h(t['month'])}" if p.get("monthly") else ""
+    if p.get("old"):
+        return f"<s>{etb(p['old'])}</s> → <b>{etb(p['price'])}{period}</b> {h(t['only'])}"
+    return f"<b>{etb(p['price'])}{period}</b>"
+
+
+def discount_line(p, t):
+    pct = discount_pct(p)
+    return f"🎁 <b>{pct}% {h(t['off'])}</b>" if pct else ""
+
+
+def from_price(service):
+    return f"{min(p['price'] for p in PACKAGES[service]['items']):,}"
+
+
+def contact_button(t, text=None):
+    if not CONTACT_USERNAME:
+        return None
+    return InlineKeyboardButton(text or t["m_contact"], url=f"https://t.me/{CONTACT_USERNAME}")
+
+
+def main_menu(lang):
+    lang = L(lang)
+    t = T[lang]
+    rows = []
+    for service, svc in PACKAGES.items():
+        label = f"{svc['emoji']} {svc['title'][lang]} ({'ከ' if lang == 'am' else 'from'} {from_price(service)} ETB)"
+        rows.append([InlineKeyboardButton(label, callback_data=f"svc_{service}")])
+    if PORTFOLIO_URL:
+        rows.append([InlineKeyboardButton(t["m_portfolio"], url=PORTFOLIO_URL)])
+    cb = contact_button(t)
+    if cb:
+        rows.append([cb])
+    row = [InlineKeyboardButton(t["m_howto"], callback_data="howto")]
+    if PAYMENT_CONFIGURED:
+        row.append(InlineKeyboardButton(t["m_pay"], callback_data="pay"))
+    rows.append(row)
+    rows.append([InlineKeyboardButton(t["m_terms"], callback_data="terms"), InlineKeyboardButton(t["m_help"], callback_data="help")])
+    rows.append([InlineKeyboardButton(t["m_lang"], callback_data="lang")])
+    return InlineKeyboardMarkup(rows)
+
+
+def back_menu(lang, extra_rows=None):
+    rows = list(extra_rows or [])
+    rows.append([InlineKeyboardButton(T[L(lang)]["back"], callback_data="menu")])
+    return InlineKeyboardMarkup(rows)
+
+
+def welcome_page(lang):
+    return T[L(lang)]["welcome"], main_menu(lang)
+
+
+def service_page(service, lang):
+    lang = L(lang)
+    t = T[lang]
+    svc = PACKAGES[service]
+    lines = [f"{svc['emoji']} <b>{h(svc['title'][lang])}</b>", "", h(svc["tagline"][lang]), "", h(t["choose"]), ""]
+    rows = []
+    for p in svc["items"]:
+        lines.append(f"{p['emoji']} <b>{h(p['name'])}</b>")
+        lines.append(f"   {h(p['includes'][lang])}")
+        disc = discount_line(p, t)
+        lines.append(f"   {price_line(p, t)}" + (f"  {disc}" if disc else ""))
+        lines.append("")
+        rows.append([InlineKeyboardButton(f"{p['emoji']} {p['name']} · {etb(p['price'])}", callback_data=f"pkg_{service}_{p['key']}")])
+    lines.append(h(t["price_note"]))
+    return "\n".join(lines), back_menu(lang, rows)
+
+
+def package_page(service, key, lang):
+    found = find_package(service, key)
+    if not found:
+        return None
+    lang = L(lang)
+    t = T[lang]
+    svc, p = found
+    lines = [f"{p['emoji']} <b>{h(p['name'])}</b>", "", f"📦 {h(t['includes'])}: {h(p['includes'][lang])}", f"💰 {price_line(p, t)}"]
+    disc = discount_line(p, t)
+    if disc:
+        lines.append(disc)
+    lines += ["", h(t["price_note"])]
+    rows = []
+    cb = contact_button(t, t["order_chat"])
+    if cb:
+        rows.append([cb])
+    rows.append([InlineKeyboardButton(t["back_pkgs"], callback_data=f"svc_{service}")])
+    return "\n".join(lines), back_menu(lang, rows)
+
+
+def payment_page(lang):
+    t = T[L(lang)]
+    text = (
+        f"{t['pay_title']}\n\n"
+        f"🔹 <b>CBE</b>: <code>{h(CBE_ACCOUNT)}</code>\n👤 {h(CBE_NAME)}\n\n"
+        f"🔹 <b>Telebirr</b>: <code>{h(TELEBIRR_NUMBER)}</code>\n👤 {h(TELEBIRR_NAME)}\n\n"
+        f"{h(t['pay_warn'])}"
     )
-    conn.commit()
+    rows = []
+    cb = contact_button(t)
+    if cb:
+        rows.append([cb])
+    return text, back_menu(lang, rows)
 
-    lang = get_user_lang(user.id)
-    t = TEXTS.get(lang, TEXTS['am'])
 
-    cursor.execute("SELECT phone_number FROM users WHERE user_id = ?", (user.id,))
-    row = cursor.fetchone()
-    conn.close()
-
-    if row and not row[0]:
-        reply_markup = ReplyKeyboardMarkup(
-            [[KeyboardButton(t['phone_btn'], request_contact=True)], [KeyboardButton(t['skip_phone'])]],
-            resize_keyboard=True,
-            one_time_keyboard=True
-        )
-        if update.message:
-            await update.message.reply_text(t['phone_prompt'].format(name=user.first_name), reply_markup=reply_markup)
-        return
-
-    welcome_text = t['welcome'].format(name=user.first_name)
-    reply_markup = build_main_keyboard(t)
-
-    if update.message:
-        await update.message.reply_text(welcome_text, reply_markup=reply_markup, parse_mode="Markdown")
-    elif update.callback_query:
-        query = update.callback_query
-        await query.edit_message_text(welcome_text, reply_markup=reply_markup, parse_mode="Markdown")
-
-# 🔒 RESTRICTED ADMIN STATS
-async def stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user_id = update.effective_user.id
-    if user_id != ADMIN_USER_ID:
-        return
-
-    conn = sqlite3.connect(DB_FILE)
-    cursor = conn.cursor()
-    cursor.execute("SELECT COUNT(*) FROM users")
-    total_users = cursor.fetchone()[0]
-    cursor.execute("SELECT COUNT(*) FROM users WHERE phone_number IS NOT NULL AND phone_number NOT IN ('', 'SKIPPED')")
-    phone_leads = cursor.fetchone()[0]
-    cursor.execute("SELECT COUNT(*) FROM users WHERE phone_number = 'SKIPPED'")
-    skipped = cursor.fetchone()[0]
-    cursor.execute("SELECT COUNT(*) FROM users WHERE phone_number IS NULL OR phone_number = ''")
-    no_answer = cursor.fetchone()[0]
-    cursor.execute("SELECT COUNT(*) FROM reviews")
-    total_reviews = cursor.fetchone()[0]
-    cursor.execute("SELECT COUNT(*) FROM reviews WHERE approved = 0")
-    pending_reviews = cursor.fetchone()[0]
-    cursor.execute("SELECT COUNT(*) FROM orders")
-    total_orders = cursor.fetchone()[0]
-    cursor.execute("SELECT COUNT(*) FROM orders WHERE status = 'pending'")
-    pending_orders = cursor.fetchone()[0]
-    conn.close()
-
-    stats_msg = (
-        "📊 RM Media Private Admin Analytics\n\n"
-        f"👥 አጠቃላይ የቦት ተጠቃሚዎች: {total_users}\n"
-        f"📱 ስልክ ያጋሩ (Verified Leads): {phone_leads}\n"
-        f"⏭ ስልክ Skip ያደረጉ (Skipped): {skipped}\n"
-        f"❔ ገና ያልመለሱ (No answer yet): {no_answer}\n\n"
-        f"🛒 የተደረጉ አጠቃላይ ትዕዛዞች: {total_orders} (⏳ በመጠባበቅ ላይ: {pending_orders})\n"
-        f"⭐ የተጻፉ ሪቪውዎች: {total_reviews} (⏳ ማረጋገጫ የሚጠብቁ: {pending_reviews})"
-    )
-    await update.message.reply_text(stats_msg)
-
-# 📢 ADMIN BROADCAST COMMAND (/broadcast መልእክት)
-async def broadcast(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user_id = update.effective_user.id
-    if user_id != ADMIN_USER_ID:
-        return
-
-    if not context.args:
-        await update.message.reply_text("⚠️ **አጠቃቀም:** `/broadcast የ መልእክት ጽሁፍ`", parse_mode="Markdown")
-        return
-
-    broadcast_msg = " ".join(context.args)
-    conn = sqlite3.connect(DB_FILE)
-    cursor = conn.cursor()
-    cursor.execute("SELECT user_id FROM users")
-    users = cursor.fetchall()
-    conn.close()
-
-    sent_count = 0
-    for u in users:
-        try:
-            await context.bot.send_message(chat_id=u[0], text=broadcast_msg, parse_mode="Markdown")
-            sent_count += 1
-        except Exception:
-            continue
-
-    await update.message.reply_text(f"✅ **መልእክቱ ለ {sent_count} ተጠቃሚዎች በተሳካ ሁኔታ ተልኳል!**")
-
-async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    await query.answer()
-
-    data = query.data
-    user_id = query.from_user.id
-    lang = get_user_lang(user_id)
-    t = TEXTS.get(lang, TEXTS['am'])
-
-    if data in ["serv_design", "serv_video", "serv_social"]:
-        service_key = data.replace("serv_", "")
-        desc_key = f"{service_key}_desc"
-        markup = InlineKeyboardMarkup([
-            [InlineKeyboardButton(t['order_now'], callback_data=f"order_{service_key}")],
-            [InlineKeyboardButton(t['back_menu'], callback_data="main_menu")],
-        ])
-        await query.edit_message_text(t[desc_key], reply_markup=markup, parse_mode="Markdown")
-
-    elif data.startswith("order_"):
-        service_name = data.replace("order_", "")
-        order_id, _ = get_or_create_pending_order(user_id, service_name=service_name)
-
-        context.user_data["waiting_for_receipt"] = True
-        context.user_data["current_order_id"] = order_id
-        markup = InlineKeyboardMarkup([[InlineKeyboardButton(t['back_menu'], callback_data="main_menu")]])
-        checkout = f"{t['order_label']}: #{order_id}\n\n" + t['checkout_text']
-        await query.edit_message_text(checkout, reply_markup=markup, parse_mode="Markdown")
-
-    elif data == "serv_portfolio":
-        markup = InlineKeyboardMarkup([
-            [InlineKeyboardButton("🔗 የጥራት ማህደራችንን ይጎብኙ (Explore Archive)", url="https://t.me/Real_Works_Ethiopia")],
-            [InlineKeyboardButton(t['back_menu'], callback_data="main_menu")],
-        ])
-        await query.edit_message_text(t['portfolio_desc'], reply_markup=markup, parse_mode="Markdown")
-
-    elif data == "show_reviews":
-        conn = sqlite3.connect(DB_FILE)
-        cursor = conn.cursor()
-        cursor.execute("SELECT full_name, rating, review_text FROM reviews WHERE approved = 1 ORDER BY id DESC LIMIT 3")
-        rows = cursor.fetchall()
-        conn.close()
-
-        rev_text = "⭐ **Verified Client Testimonials / የተረጋገጡ የደንበኞች ግምገማዎች** ⭐\n\n"
-        if not rows:
-            rev_text += t['no_reviews']
-        for name, rating, r_text in rows:
-            stars = "⭐" * max(1, min(int(rating or 5), 5))
-            safe_name = md_escape(first_name_only(name))
-            rev_text += f"👤 **{safe_name}** {stars}\n💬 \"{md_escape(r_text)}\"\n\n"
-
-        markup = InlineKeyboardMarkup([
-            [InlineKeyboardButton(t['btn_leave_review'], callback_data="leave_review")],
-            [InlineKeyboardButton(t['back_menu'], callback_data="main_menu")]
-        ])
-        await query.edit_message_text(rev_text, reply_markup=markup, parse_mode="Markdown")
-
-    elif data == "leave_review":
-        context.user_data["waiting_for_review"] = True
-        context.user_data["review_rating"] = 5
-        await query.edit_message_text(review_prompt_text(t, 5), reply_markup=review_prompt_markup(t), parse_mode="Markdown")
-
-    elif data.startswith("rate_"):
-        try:
-            rating = max(1, min(int(data.split("_")[1]), 5))
-        except ValueError:
-            rating = 5
-        context.user_data["waiting_for_review"] = True
-        context.user_data["review_rating"] = rating
-        try:
-            await query.edit_message_text(review_prompt_text(t, rating), reply_markup=review_prompt_markup(t), parse_mode="Markdown")
-        except TelegramError:
-            pass  # same rating pressed twice -> "message is not modified"
-
-    elif data == "settings":
-        markup = InlineKeyboardMarkup([
-            [
-                InlineKeyboardButton("🇪🇹 አማርኛ", callback_data="lang_am"),
-                InlineKeyboardButton("🇬🇧 English", callback_data="lang_en"),
-            ],
-            [InlineKeyboardButton(t['back_menu'], callback_data="main_menu")],
-        ])
-        await query.edit_message_text("⚙️ **ቋንቋ ይምረጡ / Choose Language:**", reply_markup=markup, parse_mode="Markdown")
-
-    elif data in ["lang_am", "lang_en"]:
-        new_lang = "am" if data == "lang_am" else "en"
-        conn = sqlite3.connect(DB_FILE)
-        cursor = conn.cursor()
-        cursor.execute("UPDATE users SET language = ? WHERE user_id = ?", (new_lang, user_id))
-        conn.commit()
-        conn.close()
-        await query.edit_message_text(TEXTS[new_lang]['welcome'].format(name=query.from_user.first_name), reply_markup=build_main_keyboard(TEXTS[new_lang]), parse_mode="Markdown")
-
-    elif data == "main_menu":
-        context.user_data["waiting_for_review"] = False
-        context.user_data["waiting_for_receipt"] = False
-        welcome_text = t['welcome'].format(name=query.from_user.first_name)
-        await query.edit_message_text(welcome_text, reply_markup=build_main_keyboard(t), parse_mode="Markdown")
-
-# 🔒 ADMIN: ✅ Confirm / ❌ Reject buttons under each receipt
-async def admin_order_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    if query.from_user.id != ADMIN_USER_ID:
-        await query.answer("⛔ Not allowed", show_alert=True)
-        return
-
-    try:
-        _, action, order_id = query.data.split("_")
-        order_id = int(order_id)
-    except ValueError:
-        await query.answer("Invalid data", show_alert=True)
-        return
-
-    confirm = action == "ok"
-    new_status = "confirmed" if confirm else "rejected"
-
-    conn = sqlite3.connect(DB_FILE)
-    cursor = conn.cursor()
-    cursor.execute("SELECT user_id, status FROM orders WHERE id = ?", (order_id,))
-    row = cursor.fetchone()
-    if not row:
-        conn.close()
-        await query.answer(f"Order #{order_id} not found", show_alert=True)
-        return
-
-    customer_id, status = row
-    cursor.execute(
-        "UPDATE orders SET status = ? WHERE id = ? AND status NOT IN ('confirmed', 'rejected')",
-        (new_status, order_id),
-    )
-    changed = cursor.rowcount
-    conn.commit()
-    conn.close()
-
-    if not changed:
-        await query.answer(f"Order #{order_id} is already {status}", show_alert=True)
-        try:
-            await query.edit_message_reply_markup(reply_markup=None)
-        except TelegramError:
-            pass
-        return
-
-    t = TEXTS.get(get_user_lang(customer_id), TEXTS['am'])
-    key = "order_confirmed" if confirm else "order_rejected"
-    try:
-        await context.bot.send_message(
-            chat_id=customer_id,
-            text=t[key].format(order_id=order_id),
-            parse_mode="Markdown",
-        )
-        delivered = "customer notified"
-    except TelegramError:
-        delivered = "could NOT message the customer (they may have blocked the bot)"
-
-    await query.answer("Done")
-    try:
-        await query.edit_message_reply_markup(reply_markup=None)
-    except TelegramError:
-        pass
-    await query.message.reply_text(f"Order #{order_id} -> {new_status.upper()} ({delivered}).")
-
-# 🔒 ADMIN: ✅ Approve / ❌ Reject buttons under each pending review
-async def review_moderation_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    if query.from_user.id != ADMIN_USER_ID:
-        await query.answer("⛔ Not allowed", show_alert=True)
-        return
-
-    try:
-        _, action, review_id = query.data.split("_")
-        review_id = int(review_id)
-    except ValueError:
-        await query.answer("Invalid data", show_alert=True)
-        return
-
-    approve = action == "ok"
-    conn = sqlite3.connect(DB_FILE)
-    cursor = conn.cursor()
-    if approve:
-        cursor.execute("UPDATE reviews SET approved = 1 WHERE id = ? AND approved = 0", (review_id,))
+def terms_page(lang):
+    lang = L(lang)
+    t = T[lang]
+    custom = [(t["t_delivery"], TERMS_DELIVERY), (t["t_revisions"], TERMS_REVISIONS), (t["t_refund"], TERMS_REFUND)]
+    custom = [(label, value) for label, value in custom if value]
+    if custom:
+        section = t["terms_custom"] + "\n" + "\n".join(f"• {h(label)}: {h(value)}" for label, value in custom)
     else:
-        cursor.execute("DELETE FROM reviews WHERE id = ? AND approved = 0", (review_id,))
-    changed = cursor.rowcount
-    conn.commit()
-    conn.close()
+        section = t["terms_default"]
+    text = f"{t['terms_title']}\n\n{t['terms_body']}{section}{t['terms_data']}"
+    rows = []
+    cb = contact_button(t)
+    if cb:
+        rows.append([cb])
+    return text, back_menu(lang, rows)
 
-    try:
-        await query.edit_message_reply_markup(reply_markup=None)
-    except TelegramError:
-        pass
 
-    if not changed:
-        await query.answer(f"Review #{review_id} was already handled", show_alert=True)
-        return
+def help_page(lang):
+    t = T[L(lang)]
+    rows = []
+    cb = contact_button(t)
+    if cb:
+        rows.append([cb])
+    return t["help"], back_menu(lang, rows)
 
-    await query.answer("Done")
-    result = "APPROVED -> now public" if approve else "REJECTED -> deleted"
-    await query.message.reply_text(f"Review #{review_id} {result}.")
 
-async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
+def howto_page(lang):
+    t = T[L(lang)]
+    rows = []
+    cb = contact_button(t, t["order_chat"])
+    if cb:
+        rows.append([cb])
+    return t["howto"], back_menu(lang, rows)
+
+
+def lang_page(lang):
+    t = T[L(lang)]
+    rows = [[InlineKeyboardButton("🇪🇹 አማርኛ", callback_data="setlang_am"), InlineKeyboardButton("🇬🇧 English", callback_data="setlang_en")],
+            [InlineKeyboardButton(t["back"], callback_data="menu")]]
+    return t["lang_title"], InlineKeyboardMarkup(rows)
+
+
+def delete_page(lang):
+    t = T[L(lang)]
+    rows = [[InlineKeyboardButton(t["delete_yes"], callback_data="del_yes"), InlineKeyboardButton(t["delete_no"], callback_data="del_no")]]
+    return t["delete_ask"], InlineKeyboardMarkup(rows)
+
+
+# ---------------------------------------------------------------------------
+# Handlers
+# ---------------------------------------------------------------------------
+@guarded
+async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
-    lang = get_user_lang(user.id)
-    t = TEXTS.get(lang, TEXTS['am'])
+    db_register_user(user)
+    text, markup = welcome_page(db_get_lang(user.id))
+    await safe_reply(update, text, markup)
 
-    if update.message.contact:
-        contact = update.message.contact
-        if contact.user_id and contact.user_id != user.id:
-            await update.message.reply_text(t['contact_not_own'])
-            return
-        phone = contact.phone_number
-        conn = sqlite3.connect(DB_FILE)
-        cursor = conn.cursor()
-        cursor.execute("INSERT OR IGNORE INTO users (user_id, full_name) VALUES (?, ?)", (user.id, user.full_name))
-        cursor.execute("SELECT phone_number FROM users WHERE user_id = ?", (user.id,))
-        prev = cursor.fetchone()
-        first_time = not (prev and prev[0])
-        cursor.execute("UPDATE users SET phone_number = ? WHERE user_id = ?", (phone, user.id))
-        conn.commit()
-        conn.close()
 
-        await update.message.reply_text("✅ እናመሰግናለን! ስልክ ቁጥርዎ ተመዝግቧል።", reply_markup=ReplyKeyboardRemove())
-        if first_time:
-            await notify_admin(context, (
-                f"👤 አዲስ ተጠቃሚ ተመዝግቧል: {user.full_name} | ስልክ: {phone}\n"
-                f"🔗 {'@' + user.username if user.username else '-'} | 🪪 ID: {user.id}"
-            ))
-        await start(update, context)
+@guarded
+async def cmd_help(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    text, markup = help_page(db_get_lang(update.effective_user.id))
+    await safe_reply(update, text, markup)
+
+
+@guarded
+async def cmd_terms(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    text, markup = terms_page(db_get_lang(update.effective_user.id))
+    await safe_reply(update, text, markup)
+
+
+@guarded
+async def cmd_deletemydata(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    text, markup = delete_page(db_get_lang(update.effective_user.id))
+    await safe_reply(update, text, markup)
+
+
+@guarded
+async def cmd_stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if update.effective_user.id not in ADMIN_IDS:
+        return  # silent for everyone else
+    try:
+        total, am, en = db_stats()
+    except sqlite3.Error as e:
+        logger.error("stats failed: %s", e)
+        await update.effective_message.reply_text("DB error, see logs.")
+        return
+    await update.effective_message.reply_text(f"📊 Users: {total}\n🇪🇹 am: {am}\n🇬🇧 en: {en}")
+
+
+@guarded
+async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    lang = db_get_lang(update.effective_user.id)
+    await safe_reply(update, T[L(lang)]["unknown"], main_menu(lang))
+
+
+_CALLBACK_RE = re.compile(r"^[a-z0-9_]{1,40}$")
+
+
+@guarded
+async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    user = update.effective_user
+    data = query.data or ""
+    try:
+        await query.answer()
+    except BadRequest:
+        pass  # old / already answered query
+    if not _CALLBACK_RE.match(data):
         return
 
-    if update.message.text in ["ዝለል / Skip ➡️", "Skip ➡️"]:
-        conn = sqlite3.connect(DB_FILE)
-        cursor = conn.cursor()
-        cursor.execute("INSERT OR IGNORE INTO users (user_id, full_name) VALUES (?, ?)", (user.id, user.full_name))
-        cursor.execute("SELECT phone_number FROM users WHERE user_id = ?", (user.id,))
-        prev = cursor.fetchone()
-        first_time = not (prev and prev[0])
-        if first_time:  # never overwrite an already shared phone number
-            cursor.execute("UPDATE users SET phone_number = 'SKIPPED' WHERE user_id = ?", (user.id,))
-        conn.commit()
-        conn.close()
-        await update.message.reply_text("እንቀጥል...", reply_markup=ReplyKeyboardRemove())
-        if first_time:
-            await notify_admin(context, (
-                f"👤 አዲስ ተጠቃሚ ተመዝግቧል: {user.full_name} | ስልክ: Skip\n"
-                f"🔗 {'@' + user.username if user.username else '-'} | 🪪 ID: {user.id}"
-            ))
-        await start(update, context)
-        return
+    lang = db_get_lang(user.id)
+    t = T[L(lang)]
 
-    if context.user_data.get("waiting_for_receipt"):
-        msg = update.message
-        photo = msg.photo[-1] if msg.photo else None
-        doc = msg.document
-        ref_text = (msg.text or "").strip()
-        if not photo and not doc and len(ref_text) < 4:
-            await msg.reply_text(t['receipt_invalid'])
-            return
+    if data == "menu":
+        text, markup = welcome_page(lang)
+    elif data.startswith("svc_") and data[4:] in PACKAGES:
+        text, markup = service_page(data[4:], lang)
+    elif data.startswith("pkg_"):
+        parts = data.split("_")
+        page = package_page(parts[1], parts[2], lang) if len(parts) == 3 else None
+        text, markup = page if page else welcome_page(lang)
+    elif data == "howto":
+        text, markup = howto_page(lang)
+    elif data == "pay" and PAYMENT_CONFIGURED:
+        text, markup = payment_page(lang)
+    elif data == "terms":
+        text, markup = terms_page(lang)
+    elif data == "help":
+        text, markup = help_page(lang)
+    elif data == "lang":
+        text, markup = lang_page(lang)
+    elif data in ("setlang_am", "setlang_en"):
+        db_set_lang(user, data[-2:])
+        lang = db_get_lang(user.id)
+        text, markup = T[lang]["lang_saved"] + "\n\n" + T[lang]["welcome"], main_menu(lang)
+    elif data == "del_yes":
+        ok = db_delete_user(user.id)
+        text = t["delete_done"] if ok else t["delete_fail"]
+        markup = None
+    elif data == "del_no":
+        text, markup = t["delete_cancel"], None
+    else:
+        text, markup = welcome_page(lang)
 
-        context.user_data["waiting_for_receipt"] = False
-        order_id, service = get_or_create_pending_order(user.id, context.user_data.get("current_order_id"))
+    await safe_edit(query, text, markup)
 
-        conn = sqlite3.connect(DB_FILE)
-        cursor = conn.cursor()
-        cursor.execute("SELECT phone_number FROM users WHERE user_id = ?", (user.id,))
-        prow = cursor.fetchone()
-        conn.close()
-        phone = prow[0] if prow and prow[0] and prow[0] != 'SKIPPED' else "-"
 
-        caption = (
-            "🧾 NEW PAYMENT RECEIPT\n\n"
-            f"🆔 Order: #{order_id}\n"
-            f"🛍 Service: {SERVICE_LABELS.get(service, service)}\n"
-            f"👤 Name: {user.full_name}\n"
-            f"🔗 Username: {'@' + user.username if user.username else '-'}\n"
-            f"🪪 User ID: {user.id}\n"
-            f"📱 Phone: {phone}\n"
-            f"🕒 {datetime.now().strftime('%Y-%m-%d %H:%M')}"
-        )
-        if ref_text and not photo and not doc:
-            caption += f"\n\n📝 Reference:\n{ref_text[:1500]}"
+# ---------------------------------------------------------------------------
+# Keep-alive web server (Render) + optional self-ping
+# ---------------------------------------------------------------------------
+web = Flask(__name__)
 
-        admin_markup = InlineKeyboardMarkup([[
-            InlineKeyboardButton("✅ አረጋግጥ", callback_data=f"adm_ok_{order_id}"),
-            InlineKeyboardButton("❌ ውድቅ አድርግ", callback_data=f"adm_no_{order_id}"),
-        ]])
+
+@web.route("/")
+def home():
+    return "OK", 200
+
+
+def run_web():
+    web.run(host="0.0.0.0", port=PORT)
+
+
+def self_ping_loop():
+    while True:
+        time.sleep(600)
         try:
-            if photo:
-                await context.bot.send_photo(chat_id=ADMIN_USER_ID, photo=photo.file_id, caption=caption, reply_markup=admin_markup)
-            elif doc:
-                await context.bot.send_document(chat_id=ADMIN_USER_ID, document=doc.file_id, caption=caption, reply_markup=admin_markup)
-            else:
-                await context.bot.send_message(chat_id=ADMIN_USER_ID, text=caption, reply_markup=admin_markup)
-        except TelegramError as e:
-            logger.error("Could not notify admin about order #%s (has the admin pressed /start?): %s", order_id, e)
+            urllib.request.urlopen(SELF_PING_URL, timeout=10).read(16)
+        except Exception as e:  # never crash the thread
+            logger.warning("self-ping failed: %s", redact(e))
 
-        await msg.reply_text(f"{t['receipt_received']}\n\n{t['order_label']}: #{order_id}", parse_mode="Markdown")
-        await start(update, context)
-        return
 
-    if context.user_data.get("waiting_for_review"):
-        review_text = update.message.text
-        if not review_text or len(review_text.strip()) < 5:
-            await update.message.reply_text(t['review_error'])
-            return
+def start_background_threads():
+    Thread(target=run_web, daemon=True).start()
+    if SELF_PING_URL:
+        Thread(target=self_ping_loop, daemon=True).start()
 
-        try:
-            rating = max(1, min(int(context.user_data.get("review_rating", 5)), 5))
-        except (TypeError, ValueError):
-            rating = 5
 
-        conn = sqlite3.connect(DB_FILE)
-        cursor = conn.cursor()
-        cursor.execute(
-            "INSERT INTO reviews (user_id, full_name, rating, review_text, approved) VALUES (?, ?, ?, ?, ?)",
-            (user.id, user.full_name, rating, review_text.strip(), 0),
-        )
-        review_id = cursor.lastrowid
-        conn.commit()
-        conn.close()
+# ---------------------------------------------------------------------------
+# Startup
+# ---------------------------------------------------------------------------
+def validate_config():
+    problems = []
+    if not BOT_TOKEN_RE.fullmatch(BOT_TOKEN or ""):
+        problems.append("BOT_TOKEN is missing or malformed")
+    if not ADMIN_IDS:
+        problems.append("ADMIN_USER_ID is missing (numeric Telegram ID)")
+    return problems
 
-        context.user_data["waiting_for_review"] = False
-        context.user_data.pop("review_rating", None)
 
-        admin_text = (
-            "⭐ NEW REVIEW (pending approval)\n\n"
-            f"🆔 Review: #{review_id}\n"
-            f"👤 Name: {user.full_name}\n"
-            f"🔗 Username: {'@' + user.username if user.username else '-'}\n"
-            f"🪪 User ID: {user.id}\n"
-            f"⭐ Rating: {'⭐' * rating} ({rating}/5)\n\n"
-            f"💬 {review_text.strip()[:3000]}"
-        )
-        admin_markup = InlineKeyboardMarkup([[
-            InlineKeyboardButton("✅ ሪቪውን አረጋግጥ (Approve)", callback_data=f"rev_ok_{review_id}"),
-            InlineKeyboardButton("❌ ውድቅ አድርግ (Reject)", callback_data=f"rev_no_{review_id}"),
-        ]])
-        await notify_admin(context, admin_text, admin_markup)
+def build_application():
+    builder = ApplicationBuilder().token(BOT_TOKEN)
+    try:  # extra layer: PTB's own flood-aware limiter (needs the [rate-limiter] extra)
+        builder = builder.rate_limiter(AIORateLimiter(overall_max_rate=20, max_retries=2))
+    except Exception as e:
+        logger.warning("AIORateLimiter not active (%s). Install python-telegram-bot[rate-limiter].", type(e).__name__)
+    app = builder.build()
 
-        await update.message.reply_text(t['review_success'] + t['review_pending'], parse_mode="Markdown")
-        await start(update, context)
+    private = filters.ChatType.PRIVATE
+    app.add_handler(CommandHandler("start", cmd_start, filters=private))
+    app.add_handler(CommandHandler("help", cmd_help, filters=private))
+    app.add_handler(CommandHandler("terms", cmd_terms, filters=private))
+    app.add_handler(CommandHandler("deletemydata", cmd_deletemydata, filters=private))
+    app.add_handler(CommandHandler("stats", cmd_stats, filters=private))
+    app.add_handler(CallbackQueryHandler(on_callback))
+    app.add_handler(MessageHandler(private & filters.TEXT & ~filters.COMMAND, on_text))
+    app.add_error_handler(error_handler)
+    return app
+
 
 def main():
-    keep_alive()
-    TOKEN = os.getenv("BOT_TOKEN")
-    app = ApplicationBuilder().token(TOKEN).build()
+    problems = validate_config()
+    if problems:
+        for p in problems:
+            logger.error("CONFIG ERROR: %s", p)
+        raise SystemExit(2)
 
-    app.add_handler(CommandHandler("start", start))
-    app.add_handler(CommandHandler("stats", stats))
-    app.add_handler(CommandHandler("broadcast", broadcast))
-    app.add_handler(CallbackQueryHandler(admin_order_callback, pattern=r"^adm_(ok|no)_\d+$"))
-    app.add_handler(CallbackQueryHandler(review_moderation_callback, pattern=r"^rev_(ok|no)_\d+$"))
-    app.add_handler(CallbackQueryHandler(button_handler))
-    app.add_handler(MessageHandler(filters.ALL, handle_message))
+    init_db()
+    logger.info(
+        "Config OK | admins=%d | contact=%s | portfolio=%s | payment=%s",
+        len(ADMIN_IDS), bool(CONTACT_USERNAME), bool(PORTFOLIO_URL), PAYMENT_CONFIGURED,
+    )
+    start_background_threads()
+    app = build_application()
+    logger.info("RM Media bot (Phase 1) is running.")
+    # drop_pending_updates: after a restart do not replay a backlog (avoids a burst of replies)
+    app.run_polling(allowed_updates=["message", "callback_query"], drop_pending_updates=True)
 
-    print("RM Media Secured 10x Automation Engine Running...")
-    app.run_polling()
 
 if __name__ == "__main__":
-    main()
+    try:
+        main()
+    except SystemExit:
+        time.sleep(30)  # config error: wait so a restart loop cannot hammer anything
+        raise
+    except InvalidToken:
+        logger.error("Telegram rejected the token. Check BOT_TOKEN. Sleeping before exit.")
+        time.sleep(300)
+        sys.exit(1)
+    except Exception:
+        logger.exception("Fatal crash - backing off 60s before exit to avoid a rapid restart loop")
+        time.sleep(60)
+        sys.exit(1)
